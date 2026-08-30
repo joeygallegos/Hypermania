@@ -1,0 +1,14 @@
+{
+  "name": "hypermania",
+  "version": "1.0.0",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "build:styles": "sass public/style.scss public/style.css --style=expanded",
+    "watch:styles": "sass --watch public/style.scss:public/style.css",
+    "start": "npm run build:styles && node server.js"
+  },
+  "devDependencies": {
+    "sass": "^1.77.8"
+  }
+}

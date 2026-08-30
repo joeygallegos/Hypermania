@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Runtime files and local configuration
+*.log
+.env
+.env.*
+!.env.example
+
+# Tooling output
+coverage/
+.sass-cache/
+public/*.css.map
+
+# Editor and operating-system files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
