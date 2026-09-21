@@ -1,0 +1,72 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Settings · Hypermania</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <main class="shell settings-shell">
+      <section class="hero">
+        <h1 class="brand-logo" data-text="HYPERMANIA" aria-label="Hypermania">HYPERMANIA</h1>
+        <a class="secondary nav-link" href="/">Back to chat</a>
+      </section>
+
+      <section class="panel settings-page">
+        <div class="page-head">
+          <div>
+            <p class="section-kicker">Settings</p>
+            <h2>Connection and behavior</h2>
+          </div>
+          <div id="settingsNotice" class="hint" role="status" aria-live="polite"></div>
+        </div>
+
+        <div class="settings-group">
+          <div class="instance-setting">
+            <label for="ollamaBase">Ollama instance</label>
+            <div class="row instance-row">
+              <input id="ollamaBase" type="url" inputmode="url" autocomplete="url" spellcheck="false" placeholder="http://127.0.0.1:11434" />
+              <button id="saveOllamaBase" type="button" class="secondary">Connect</button>
+            </div>
+            <div id="ollamaBaseHint" class="hint">Loading configured endpoint…</div>
+          </div>
+
+          <div class="setting-block">
+            <div class="setting-label">Active model</div>
+            <div id="activeModel" class="model-meta-summary">Loading models…</div>
+            <div id="activeModelHint" class="hint">Change the active model from the chat page.</div>
+            <button id="refreshModels" type="button" class="secondary">Refresh models</button>
+          </div>
+
+          <label>
+            Thinking
+            <select id="thinkMode">
+              <option value="auto">Auto</option>
+              <option value="off">Off</option>
+              <option value="on">On</option>
+              <option value="low">Low</option>
+              <option value="medium">Medium</option>
+              <option value="high">High</option>
+            </select>
+            <div class="hint think-hint" id="thinkHint">Loading model options…</div>
+          </label>
+
+          <label>
+            Context length
+            <select id="contextSize">
+              <option value="4096">4k</option>
+              <option value="8192">8k</option>
+              <option value="16384">16k</option>
+              <option value="32768">32k</option>
+            </select>
+            <div class="hint think-hint">Sent as Ollama <code>options.num_ctx</code>. Higher values use more VRAM.</div>
+          </label>
+        </div>
+      </section>
+    </main>
+
+    <script src="/preferences.js"></script>
+    <script src="/settings.js"></script>
+  </body>
+</html>

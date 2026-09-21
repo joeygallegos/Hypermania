@@ -4,8 +4,8 @@ const state = {
   images: [],
   models: [],
   modelInfo: new Map(),
-  contextSize: 8192,
-  thinkMode: "auto",
+  contextSize: Number.parseInt(window.hypermaniaPreferences.getContextSize(), 10) || 8192,
+  thinkMode: window.hypermaniaPreferences.getThinkMode(),
   assistantPre: null,
   assistantReasoningPre: null,
   assistantReasoningDetails: null,
@@ -17,7 +17,6 @@ const state = {
   generationActive: false,
   generationLastChunkAt: 0,
   generationPingFailures: 0,
-  settingsCollapsed: false,
 };
 
 const el = (id) => document.getElementById(id);
@@ -415,7 +414,9 @@ function renderPreview() {
 
 function setDropLabel() {
   const count = state.images.length;
-  el("dropLabel").textContent = count ? `${count} image${count === 1 ? "" : "s"} attached` : "Drop images here or click to browse";
+  el("dropLabel").textContent = count
+    ? `${count} image${count === 1 ? "" : "s"} attached`
+    : "Drop images here, click to browse, or paste in the message box";
   el("dropHint").textContent = count ? "Ready to send with your next prompt." : "PNG, JPG, WEBP, GIF";
   el("attachmentToggle").textContent = count
     ? `+ ${count} image${count === 1 ? "" : "s"} attached`
@@ -463,11 +464,14 @@ function renderThinkOptions(modelName, info) {
   const fallback = gptOss ? "medium" : "auto";
   select.value = options.some(([value]) => value === selected) ? selected : fallback;
   state.thinkMode = select.value;
+  window.hypermaniaPreferences.setThinkMode(state.thinkMode);
 
   const hint = el("thinkHint");
-  hint.textContent = gptOss
-    ? "GPT-OSS uses Low, Medium, or High. Auto maps to Medium here."
-    : "Auto lets the model decide. Off and On are best for Qwen-style models.";
+  if (hint) {
+    hint.textContent = gptOss
+      ? "GPT-OSS uses Low, Medium, or High. Auto maps to Medium here."
+      : "Auto lets the model decide. Off and On are best for Qwen-style models.";
+  }
 }
 
 function getThinkPayload(modelName, info) {
@@ -604,14 +608,6 @@ function endGenerationMonitor(statusText = "Done.") {
   setBusy(false, statusText);
 }
 
-function applySettingsCollapse() {
-  const workspace = document.querySelector(".workspace");
-  const button = el("toggleSettings");
-  if (!workspace || !button) return;
-  workspace.classList.toggle("settings-collapsed", state.settingsCollapsed);
-  button.textContent = state.settingsCollapsed ? "Expand" : "Collapse";
-}
-
 function supportsVision(info, modelName = "") {
   const capabilities = info?.capabilities || [];
   if (Array.isArray(capabilities) && capabilities.includes("vision")) {
@@ -704,7 +700,9 @@ async function loadModels() {
       select.appendChild(option);
     }
 
-    select.value = fallback;
+    const savedModel = window.hypermaniaPreferences.getModel();
+    select.value = state.models.includes(savedModel) ? savedModel : fallback;
+    window.hypermaniaPreferences.setModel(select.value);
 
     await refreshModelInfo(select.value, true);
     renderThinkOptions(select.value, state.modelInfo.get(select.value));
@@ -727,60 +725,6 @@ async function loadModels() {
     select.value = fallback;
     renderThinkOptions(select.value, state.modelInfo.get(select.value));
     renderModelMeta();
-  }
-}
-
-async function loadOllamaConfig() {
-  try {
-    const res = await fetch("/api/ollama/config", { cache: "no-store" });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-    state.ollamaBase = data.ollamaBase || "";
-    el("ollamaBase").value = state.ollamaBase;
-    el("ollamaBaseHint").textContent = "Current proxy target. Use a hostname or IP address with its Ollama port.";
-  } catch (error) {
-    el("ollamaBaseHint").textContent = "Could not read the configured endpoint. Check that the Hypermania server is running.";
-    debugLog("ollama_config_load_error", { message: error.message });
-  }
-}
-
-async function saveOllamaConfig() {
-  const button = el("saveOllamaBase");
-  const endpoint = el("ollamaBase").value.trim();
-  if (!endpoint) {
-    showError("Enter an Ollama URL, such as http://192.168.1.50:11434.");
-    return;
-  }
-
-  button.disabled = true;
-  button.textContent = "Connecting…";
-  try {
-    const res = await fetch("/api/ollama/config", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ollamaBase: endpoint }),
-    });
-    const body = await res.text();
-    if (!res.ok) throw new Error(extractErrorDetails(body) || `HTTP ${res.status}`);
-
-    const data = JSON.parse(body);
-    state.ollamaBase = data.ollamaBase;
-    el("ollamaBase").value = state.ollamaBase;
-    state.history = [];
-    el("messages").innerHTML = "";
-    clearError();
-    el("ollamaBaseHint").textContent = "Connected for this session. Update OLLAMA_BASE in the server environment to keep it after a restart.";
-    setStatus("Ollama instance changed. Loading models…");
-    debugLog("ollama_config_changed", { ollamaBase: state.ollamaBase });
-    await loadModels();
-  } catch (error) {
-    const message = extractErrorDetails(error.message || String(error));
-    showError(`Could not change the Ollama instance: ${message}`);
-    el("ollamaBaseHint").textContent = "The previous Ollama instance is still active.";
-    debugLog("ollama_config_change_error", { message });
-  } finally {
-    button.disabled = false;
-    button.textContent = "Connect";
   }
 }
 
@@ -828,8 +772,8 @@ function fileToDataUrl(file) {
   });
 }
 
-async function ingestFiles(fileList) {
-  const files = [...fileList].filter((file) => file.type.startsWith("image/"));
+async function ingestFiles(fileList, { append = false, pasted = false } = {}) {
+  const files = Array.from(fileList).filter((file) => file.type.startsWith("image/"));
   if (!files.length) return;
 
   const uploaded = [];
@@ -842,11 +786,14 @@ async function ingestFiles(fileList) {
     });
   }
 
-  state.images = uploaded;
+  state.images = append ? [...state.images, ...uploaded] : uploaded;
   renderPreview();
   setDropLabel();
   setAttachmentTrayOpen(true);
   renderModelMeta();
+  if (pasted) {
+    setStatus(`Added ${uploaded.length} pasted image${uploaded.length === 1 ? "" : "s"}.`);
+  }
 }
 
 function extractErrorDetails(raw) {
@@ -1249,32 +1196,11 @@ function attachFileHandling() {
   });
 }
 
-el("refreshModels").addEventListener("click", loadModels);
-el("saveOllamaBase").addEventListener("click", saveOllamaConfig);
 el("send").addEventListener("click", sendChat);
-el("clear").addEventListener("click", () => {
-  state.history = [];
-  state.images = [];
-  state.assistantPre = null;
-  state.assistantReasoningPre = null;
-  state.assistantReasoningDetails = null;
-  state.assistantPendingBubble = null;
-  state.assistantWait = null;
-  state.assistantWaitLabel = null;
-  el("prompt").value = "";
-  el("images").value = "";
-  el("messages").innerHTML = "";
-  clearError();
-  renderPreview();
-  setDropLabel();
-  setAttachmentTrayOpen(false);
-  renderModelMeta();
-  setStatus("Cleared.");
-  debugLog("cleared");
-});
 
 el("model").addEventListener("change", () => {
   const model = el("model").value;
+  window.hypermaniaPreferences.setModel(model);
   if (!state.modelInfo.has(model)) {
     refreshModelInfo(model, true);
   } else {
@@ -1286,30 +1212,41 @@ el("model").addEventListener("change", () => {
 
 el("thinkMode").addEventListener("change", () => {
   state.thinkMode = el("thinkMode").value;
+  window.hypermaniaPreferences.setThinkMode(state.thinkMode);
   clearError();
   debugLog("think_mode_changed", { thinkMode: state.thinkMode });
 });
 
 el("contextSize").addEventListener("change", () => {
+  window.hypermaniaPreferences.setContextSize(el("contextSize").value);
   debugLog("context_size_changed", {
     numCtx: getContextLength() ?? "invalid",
   });
 });
 
-el("toggleSettings").addEventListener("click", () => {
-  state.settingsCollapsed = !state.settingsCollapsed;
-  localStorage.setItem("ollamaUiSettingsCollapsed", state.settingsCollapsed ? "1" : "0");
-  applySettingsCollapse();
-  debugLog("settings_collapsed_changed", { collapsed: state.settingsCollapsed });
-});
-
 el("prompt").addEventListener("keydown", (event) => {
-  if ((event.metaKey || event.ctrlKey) && event.key === "Enter") {
-    sendChat();
-  }
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing || event.keyCode === 229) return;
+
+  event.preventDefault();
+  sendChat();
 });
 
 el("prompt").addEventListener("paste", (event) => {
+  const clipboard = event.clipboardData;
+  const imageFiles = Array.from(clipboard?.files || []).filter((file) => file.type.startsWith("image/"));
+  const pastedImages = imageFiles.length
+    ? imageFiles
+    : Array.from(clipboard?.items || [])
+        .filter((item) => item.kind === "file" && item.type.startsWith("image/"))
+        .map((item) => item.getAsFile())
+        .filter(Boolean);
+
+  if (pastedImages.length) {
+    event.preventDefault();
+    ingestFiles(pastedImages, { append: true, pasted: true });
+    return;
+  }
+
   const text = event.clipboardData?.getData("text/plain");
   if (typeof text !== "string" || !text) return;
 
@@ -1326,7 +1263,10 @@ el("errorBox").hidden = true;
 clearError();
 setDropLabel();
 state.sendLabel = el("send").textContent;
-state.settingsCollapsed = localStorage.getItem("ollamaUiSettingsCollapsed") === "1";
-applySettingsCollapse();
-loadOllamaConfig().finally(loadModels);
+const savedContextSize = window.hypermaniaPreferences.getContextSize();
+const contextSelect = el("contextSize");
+contextSelect.value = [...contextSelect.options].some((option) => option.value === savedContextSize) ? savedContextSize : "8192";
+state.contextSize = Number.parseInt(contextSelect.value, 10);
+window.hypermaniaPreferences.setContextSize(contextSelect.value);
+loadModels();
 debugLog("app_loaded");

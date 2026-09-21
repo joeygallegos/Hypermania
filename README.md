@@ -5,7 +5,7 @@ A focused, local-first chat interface for [Ollama](https://ollama.com). Hyperman
 ## Highlights
 
 - Connect to a local or trusted-network Ollama instance.
-- Stream chats live, with model-aware thinking controls and context-length settings.
+- Stream chats live, with a model selector in chat and advanced behavior controls on a dedicated Settings page.
 - Attach, preview, and send images to compatible models.
 - Refresh installed models without restarting the UI.
 - Run as a small Node.js service or install it with the included Linux systemd helper.
@@ -52,16 +52,17 @@ $env:OLLAMA_BASE = "http://192.168.1.50:11434"
 npm start
 ```
 
-You can also change the active endpoint from **Settings → Ollama instance** using a hostname or IP address, such as `http://ollama.lan:11434`. That change takes effect immediately, but resets when Hypermania restarts. Set `OLLAMA_BASE` in your shell or Linux service environment file to make it persistent.
+You can also change the active endpoint from the **Settings** page using a hostname or IP address, such as `http://ollama.lan:11434`. That change takes effect immediately, but resets when Hypermania restarts. Set `OLLAMA_BASE` in your shell or Linux service environment file to make it persistent.
 
 ## Using Hypermania
 
-- Hypermania reads installed models and capabilities directly from Ollama.
+- Hypermania reads installed models and capabilities directly from Ollama. Choose the active model from the chat header; use **Settings** for endpoint, thinking, context length, and model refresh.
 - Image uploads are blocked if the selected model does not support vision.
 - **Thinking** is sent only when the selected model supports it; individual models may still ignore a chosen mode.
 - **Context length** is passed to Ollama as `options.num_ctx`. Larger contexts consume more memory or VRAM.
 - Markdown is rendered after a response completes. During streaming, content stays plain text so the layout does not jump.
-- The **Add images** tray supports selecting files and drag-and-drop.
+- The **Add images** tray supports selecting files and drag-and-drop. Paste clipboard images into the message box to attach them, too.
+- Press **Enter** to send a message; use **Shift+Enter** for a new line.
 - Browser events and proxy request summaries are appended to `hypermania.log` beside `server.js`.
 
 ## Linux systemd install

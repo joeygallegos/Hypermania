@@ -12,86 +12,27 @@
         <div class="hero-copy">
           <h1 class="brand-logo" data-text="HYPERMANIA" aria-label="Hypermania">HYPERMANIA</h1>
         </div>
-        <div class="hero-meta">
-          <div class="status" id="status">Checking Ollama...</div>
+        <div class="hero-actions">
+          <label class="model-picker" for="model">
+            <span>Model</span>
+            <select id="model" aria-describedby="modelMeta"></select>
+          </label>
+          <a class="secondary nav-link" href="/settings.html">Settings</a>
         </div>
       </section>
 
-      <section class="workspace">
-        <aside class="panel controls">
-          <div class="settings-head">
-            <div>
-              <p class="section-kicker">Settings</p>
-              <h2>Model and behavior</h2>
-            </div>
-            <div class="settings-actions">
-              <button id="toggleSettings" type="button" class="secondary">Collapse</button>
-              <button id="refreshModels" type="button" class="secondary">Refresh</button>
-            </div>
-          </div>
-
-          <div id="settingsBody" class="settings-body">
-            <div class="settings-group">
-              <div class="instance-setting">
-                <label for="ollamaBase">Ollama instance</label>
-                <div class="row instance-row">
-                  <input id="ollamaBase" type="url" inputmode="url" autocomplete="url" spellcheck="false" placeholder="http://127.0.0.1:11434" />
-                  <button id="saveOllamaBase" type="button" class="secondary">Connect</button>
-                </div>
-                <div id="ollamaBaseHint" class="hint">Loading configured endpoint…</div>
-              </div>
-
-              <label>
-                Model
-                <div class="row">
-                  <select id="model"></select>
-                </div>
-                <div id="modelMeta" class="model-meta"></div>
-              </label>
-
-              <label>
-                Thinking
-                <div class="row">
-                  <select id="thinkMode">
-                    <option value="auto">Auto</option>
-                    <option value="off">Off</option>
-                    <option value="on">On</option>
-                    <option value="low">Low</option>
-                    <option value="medium">Medium</option>
-                    <option value="high">High</option>
-                  </select>
-                </div>
-                <div class="hint think-hint" id="thinkHint">
-                  Auto lets the model decide. Some models ignore certain modes.
-                </div>
-              </label>
-
-              <label>
-                Context length
-                <div class="row">
-                  <select id="contextSize">
-                    <option value="4096">4k</option>
-                    <option value="8192" selected>8k</option>
-                    <option value="16384">16k</option>
-                    <option value="32768">32k</option>
-                  </select>
-                </div>
-                <div class="hint think-hint" id="contextHint">
-                  Sent as Ollama `options.num_ctx`. Higher values use more VRAM.
-                </div>
-              </label>
-            </div>
-          </div>
-        </aside>
-
-        <section class="panel chat">
+      <section class="panel chat">
           <div class="chat-head">
-            <div>
-              <p class="section-kicker">Conversation</p>
-              <h2>Chat</h2>
-            </div>
-            <span class="hint">Responses stream live from `/api/chat`.</span>
+            <div id="modelMeta" class="model-meta" aria-live="polite"></div>
           </div>
+          <select id="thinkMode" hidden aria-hidden="true"></select>
+          <select id="contextSize" hidden aria-hidden="true">
+            <option value="4096">4k</option>
+            <option value="8192">8k</option>
+            <option value="16384">16k</option>
+            <option value="32768">32k</option>
+          </select>
+          <div id="status" class="visually-hidden" aria-live="polite"></div>
           <div id="errorBox" class="error-box" hidden>
             <strong>Error</strong>
             <p id="errorMessage"></p>
@@ -100,10 +41,10 @@
           <div id="messages" class="messages" aria-live="polite"></div>
           <div class="composer">
             <div id="attachmentTray" class="attachment-tray" hidden>
-              <div id="dropzone" class="dropzone compact" tabindex="0" role="button" aria-label="Drop images here or click to browse">
+              <div id="dropzone" class="dropzone compact" tabindex="0" role="button" aria-label="Drop images here or click to browse; paste images into the message box">
                 <input id="images" type="file" accept="image/*" multiple hidden />
                 <div class="dropzone-copy">
-                  <strong id="dropLabel">Drop images here or click to browse</strong>
+                  <strong id="dropLabel">Drop images here, click to browse, or paste in the message box</strong>
                   <span class="hint" id="dropHint">PNG, JPG, WEBP, GIF</span>
                 </div>
               </div>
@@ -117,13 +58,12 @@
             <div class="composer-actions">
               <button id="attachmentToggle" type="button" class="secondary attachment-toggle" aria-expanded="false" aria-controls="attachmentTray">+ Add images</button>
               <button id="send" type="button">Send to Ollama</button>
-              <button id="clear" type="button" class="secondary">Clear</button>
             </div>
           </div>
-        </section>
       </section>
     </main>
 
+    <script src="/preferences.js"></script>
     <script src="/app.js"></script>
   </body>
 </html>
