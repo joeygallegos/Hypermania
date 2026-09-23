@@ -1110,7 +1110,7 @@ button.secondary {
     min-height: 70vh;
   }
 }
-@media (max-width: 520px) {
+@media (max-width: 680px) {
   .hero {
     flex-direction: column;
     align-items: stretch;

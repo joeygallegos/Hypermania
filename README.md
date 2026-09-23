@@ -6,7 +6,7 @@ A focused, local-first chat interface for [Ollama](https://ollama.com). Hyperman
 
 - Connect to a local or trusted-network Ollama instance.
 - Stream chats live, with a model selector in chat and advanced behavior controls on a dedicated Settings page.
-- Attach, preview, and send images to compatible models.
+- Attach images or PDFs, preview the resulting pages, and send them to compatible vision models. PDFs are rendered locally into PNG page images before they reach Ollama.
 - Refresh installed models without restarting the UI.
 - Run as a small Node.js service or install it with the included Linux systemd helper.
 
@@ -107,7 +107,7 @@ If you edit `hypermania.env`, restart the service for changes to apply. Re-runni
 - Hypermania listens on all network interfaces, has no authentication, and permits cross-origin API requests. Keep it on a trusted network. Use a firewall and authenticated reverse proxy before exposing it externally.
 - The browser endpoint control may be changed only from the local machine; use `OLLAMA_BASE` for the durable default.
 - Ollama must be reachable by the machine and account running Hypermania. For the default setup, ensure `ollama serve` or the Ollama system service is running.
-- Image input requires a multimodal model. Text-only models are identified in the UI and will not receive attached images.
+- Image and PDF input requires a multimodal model. Text-only models are identified in the UI and will not receive attachments. PDF rendering requires Poppler (`pdfinfo` and `pdftoppm`) on the Hypermania server; PDFs are limited to 25 MB and 32 pages.
 - `hypermania.log` grows over time; rotate or archive it as part of normal host maintenance.
 
 ## Development

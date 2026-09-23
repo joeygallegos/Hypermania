@@ -1131,7 +1131,10 @@ button.secondary {
   }
 }
 
-@media (max-width: 520px) {
+// Keep the logo and controls from competing for the same row on narrow tablets.
+// The desktop header needs roughly 640px of usable width once its minimum-size
+// model picker, Settings button, and brand are accounted for.
+@media (max-width: 680px) {
   .hero {
     flex-direction: column;
     align-items: stretch;

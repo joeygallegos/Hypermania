@@ -41,22 +41,22 @@
           <div id="messages" class="messages" aria-live="polite"></div>
           <div class="composer">
             <div id="attachmentTray" class="attachment-tray" hidden>
-              <div id="dropzone" class="dropzone compact" tabindex="0" role="button" aria-label="Drop images here or click to browse; paste images into the message box">
-                <input id="images" type="file" accept="image/*" multiple hidden />
+              <div id="dropzone" class="dropzone compact" tabindex="0" role="button" aria-label="Drop images or PDF files here or click to browse; paste images into the message box">
+                <input id="images" type="file" accept="image/*,application/pdf,.pdf" multiple hidden />
                 <div class="dropzone-copy">
-                  <strong id="dropLabel">Drop images here, click to browse, or paste in the message box</strong>
-                  <span class="hint" id="dropHint">PNG, JPG, WEBP, GIF</span>
+                  <strong id="dropLabel">Drop images or PDFs here, click to browse, or paste images in the message box</strong>
+                  <span class="hint" id="dropHint">PNG, JPG, WEBP, GIF, PDF (up to 32 pages)</span>
                 </div>
               </div>
               <div id="preview" class="preview"></div>
             </div>
             <label class="composer-field">
               <span class="visually-hidden">Message</span>
-              <textarea id="prompt" rows="4" placeholder="Ask a question about the image or just chat..."></textarea>
+              <textarea id="prompt" rows="4" placeholder="Ask a question about an image or PDF, or just chat..."></textarea>
             </label>
 
             <div class="composer-actions">
-              <button id="attachmentToggle" type="button" class="secondary attachment-toggle" aria-expanded="false" aria-controls="attachmentTray">+ Add images</button>
+              <button id="attachmentToggle" type="button" class="secondary attachment-toggle" aria-expanded="false" aria-controls="attachmentTray">+ Add images or PDF</button>
               <button id="send" type="button">Send to Ollama</button>
             </div>
           </div>

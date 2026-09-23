@@ -2,6 +2,7 @@ const state = {
   requestSeq: 0,
   history: [],
   images: [],
+  pdfs: [],
   models: [],
   modelInfo: new Map(),
   contextSize: Number.parseInt(window.hypermaniaPreferences.getContextSize(), 10) || 8192,
@@ -17,6 +18,7 @@ const state = {
   generationActive: false,
   generationLastChunkAt: 0,
   generationPingFailures: 0,
+  requestInProgress: false,
 };
 
 const el = (id) => document.getElementById(id);
@@ -79,6 +81,12 @@ function setBusy(isBusy, statusText = "") {
   const send = el("send");
   send.disabled = isBusy;
   send.textContent = isBusy ? "Waiting..." : state.sendLabel;
+
+  const attachmentToggle = el("attachmentToggle");
+  const dropzone = el("dropzone");
+  attachmentToggle.disabled = isBusy;
+  dropzone.classList.toggle("disabled", isBusy);
+  dropzone.setAttribute("aria-disabled", String(isBusy));
 }
 
 function clearError() {
@@ -412,15 +420,24 @@ function renderPreview() {
   });
 }
 
+function attachmentSummary(images = state.images, pdfs = state.pdfs) {
+  const parts = [];
+  if (images.length) parts.push(`${images.length} image${images.length === 1 ? "" : "s"}`);
+  if (pdfs.length) parts.push(`${pdfs.length} PDF${pdfs.length === 1 ? "" : "s"}`);
+  return parts.join(" and ");
+}
+
 function setDropLabel() {
-  const count = state.images.length;
-  el("dropLabel").textContent = count
-    ? `${count} image${count === 1 ? "" : "s"} attached`
-    : "Drop images here, click to browse, or paste in the message box";
-  el("dropHint").textContent = count ? "Ready to send with your next prompt." : "PNG, JPG, WEBP, GIF";
-  el("attachmentToggle").textContent = count
-    ? `+ ${count} image${count === 1 ? "" : "s"} attached`
-    : "+ Add images";
+  const summary = attachmentSummary();
+  el("dropLabel").textContent = summary
+    ? `${summary} attached`
+    : "Drop images or PDFs here, click to browse, or paste images in the message box";
+  el("dropHint").textContent = summary
+    ? state.pdfs.length ? "PDF pages will be prepared when you send." : "Ready to send with your next prompt."
+    : "PNG, JPG, WEBP, GIF, PDF (up to 32 pages)";
+  el("attachmentToggle").textContent = summary
+    ? `+ ${summary} attached`
+    : "+ Add images or PDF";
 }
 
 function setAttachmentTrayOpen(open) {
@@ -650,10 +667,10 @@ function renderModelMeta() {
 
   container.appendChild(summary);
 
-  if (state.images.length && !supportsVision(info, modelName)) {
+  if ((state.images.length || state.pdfs.length) && !supportsVision(info, modelName)) {
     const note = document.createElement("div");
     note.className = "model-meta-note warn";
-    note.textContent = "Images attached, but this model cannot use them.";
+    note.textContent = "Attachments added, but this model cannot use image input.";
     container.appendChild(note);
   }
 }
@@ -772,27 +789,64 @@ function fileToDataUrl(file) {
   });
 }
 
+function isPdf(file) {
+  return file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
+}
+
+async function renderPdf(file) {
+  const dataUrl = await fileToDataUrl(file);
+  const response = await fetch("/api/pdf/render", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ data: dataUrl }),
+  });
+  const result = await response.json().catch(() => ({}));
+  if (!response.ok) throw new Error(result.error || `PDF rendering failed (HTTP ${response.status}).`);
+  if (!Array.isArray(result.images) || !result.images.length) throw new Error("PDF rendering returned no pages.");
+
+  return result.images.map((base64, index) => ({
+    name: `${file.name} - page ${index + 1}`,
+    dataUrl: `data:image/png;base64,${base64}`,
+    base64,
+  }));
+}
+
 async function ingestFiles(fileList, { append = false, pasted = false } = {}) {
-  const files = Array.from(fileList).filter((file) => file.type.startsWith("image/"));
+  const files = Array.from(fileList).filter((file) => file.type.startsWith("image/") || isPdf(file));
   if (!files.length) return;
 
-  const uploaded = [];
-  for (const file of files) {
-    const dataUrl = await fileToDataUrl(file);
-    uploaded.push({
-      name: file.name,
-      dataUrl,
-      base64: dataUrl.split(",")[1],
-    });
-  }
+  try {
+    const uploaded = [];
+    const pdfs = [];
+    for (const file of files) {
+      if (isPdf(file)) {
+        pdfs.push({ name: file.name, file });
+        continue;
+      }
+      const dataUrl = await fileToDataUrl(file);
+      uploaded.push({
+        name: file.name,
+        dataUrl,
+        base64: dataUrl.split(",")[1],
+      });
+    }
 
-  state.images = append ? [...state.images, ...uploaded] : uploaded;
-  renderPreview();
-  setDropLabel();
-  setAttachmentTrayOpen(true);
-  renderModelMeta();
-  if (pasted) {
-    setStatus(`Added ${uploaded.length} pasted image${uploaded.length === 1 ? "" : "s"}.`);
+    state.images = append ? [...state.images, ...uploaded] : uploaded;
+    state.pdfs = append ? [...state.pdfs, ...pdfs] : pdfs;
+    renderPreview();
+    setDropLabel();
+    setAttachmentTrayOpen(true);
+    renderModelMeta();
+    if (pasted) {
+      setStatus(`Added ${uploaded.length} pasted image${uploaded.length === 1 ? "" : "s"}.`);
+    } else if (pdfs.length) {
+      setStatus(`${pdfs.length} PDF${pdfs.length === 1 ? " is" : "s are"} ready to send.`);
+    }
+  } catch (error) {
+    const message = error.message || "Could not render the PDF.";
+    showError("Could not add this attachment.", message);
+    setStatus("Attachment could not be added.");
+    debugLog("attachment_error", { message });
   }
 }
 
@@ -1020,17 +1074,20 @@ async function fetchChatOnce(model, messages, thinkValue) {
 }
 
 async function sendChat() {
+  if (state.requestInProgress) return;
   clearError();
 
   const prompt = el("prompt").value.trim();
   const model = el("model").value;
   const info = state.modelInfo.get(model);
   const hasImages = state.images.length > 0;
+  const pendingPdfs = [...state.pdfs];
+  const hasAttachments = hasImages || pendingPdfs.length > 0;
   const thinkValue = getThinkPayload(model, info);
 
-  if (!prompt && !hasImages) return;
+  if (!prompt && !hasAttachments) return;
 
-  if (hasImages && !supportsVision(info, model)) {
+  if (hasAttachments && !supportsVision(info, model)) {
     const message = `The selected model, ${model}, does not support image input.`;
     const hint = imageSupportHint(model);
     showError(message, hint);
@@ -1039,38 +1096,23 @@ async function sendChat() {
     return;
   }
 
-  const userContent = prompt || "Describe the attached image.";
-  const attachments = state.images.map((img) => img.base64);
+  const userContent = prompt || "Describe the attached image or PDF.";
+  const directAttachments = state.images.map((img) => img.base64);
+  const attachmentLabel = attachmentSummary(state.images, pendingPdfs);
   const requestId = ++state.requestSeq;
   state.activeRequestId = requestId;
-  debugLog("send_start", {
-    requestId,
-    model,
-    thinkMode: state.thinkMode,
-    thinkValue: thinkValue === undefined ? "default" : String(thinkValue),
-    numCtx: getContextLength() ?? "default",
-    promptChars: userContent.length,
-    imageCount: attachments.length,
-  });
+  state.requestInProgress = true;
+  let submittedUserMessage = null;
 
   addMessage(
     "user",
-    hasImages ? `${userContent}\n\n[${state.images.length} image(s) attached]` : userContent
+    hasAttachments ? `${userContent}\n\n[${attachmentLabel} attached]` : userContent
   );
 
-  state.history.push({
-    role: "user",
-    content: userContent,
-    images: attachments,
-  });
-
-  el("prompt").value = "";
-
-  beginGenerationMonitor();
-  setBusy(true, "Waiting for Ollama...");
+  setBusy(true, pendingPdfs.length ? "Preparing PDF pages..." : "Waiting for Ollama...");
 
   try {
-    const assistant = createAssistantMessage(`model: ${model}`, summarizeThinkingContext(prompt, state.images.length));
+    const assistant = createAssistantMessage(`model: ${model}`, summarizeThinkingContext(prompt, hasAttachments ? 1 : 0));
     state.assistantPre = assistant.answerPre;
     state.assistantReasoningPre = assistant.reasoningPre;
     state.assistantReasoningDetails = assistant.reasoningDetails;
@@ -1078,6 +1120,31 @@ async function sendChat() {
     state.assistantWait = assistant.pending;
     state.assistantWaitLabel = assistant.pendingLabel;
     setAssistantAnswerText(state.assistantPre, "");
+
+    const renderedAttachments = [];
+    if (pendingPdfs.length) {
+      setBusy(true, "Preparing PDF pages...");
+      state.assistantWaitLabel.textContent = "Preparing PDF pages…";
+      for (const pdf of pendingPdfs) {
+        renderedAttachments.push(...await renderPdf(pdf.file));
+      }
+    }
+    const attachments = [...directAttachments, ...renderedAttachments.map((image) => image.base64)];
+    debugLog("send_start", {
+      requestId,
+      model,
+      thinkMode: state.thinkMode,
+      thinkValue: thinkValue === undefined ? "default" : String(thinkValue),
+      numCtx: getContextLength() ?? "default",
+      promptChars: userContent.length,
+      imageCount: attachments.length,
+    });
+    submittedUserMessage = { role: "user", content: userContent, images: attachments };
+    state.history.push(submittedUserMessage);
+    el("prompt").value = "";
+
+    beginGenerationMonitor();
+    setBusy(true, "Waiting for Ollama...");
 
     let { content: reply, thinking } = await streamChat(model, state.history, thinkValue);
     if (!reply) {
@@ -1122,11 +1189,18 @@ async function sendChat() {
     endGenerationMonitor("Done.");
     el("images").value = "";
     state.images = [];
+    state.pdfs = [];
     renderPreview();
     setDropLabel();
     setAttachmentTrayOpen(false);
     renderModelMeta();
   } catch (error) {
+    if (state.history[state.history.length - 1] === submittedUserMessage) {
+      state.history.pop();
+    }
+    if (submittedUserMessage && !el("prompt").value) {
+      el("prompt").value = prompt;
+    }
     const message = extractErrorDetails(error.message || String(error));
     const hint = message.toLowerCase().includes("multimodal")
       ? imageSupportHint(model)
@@ -1143,6 +1217,7 @@ async function sendChat() {
       setAssistantAnswerText(state.assistantPre, `Error: ${message}`);
     }
   } finally {
+    state.requestInProgress = false;
     endGenerationMonitor(el("status").textContent || "Done.");
     if (state.assistantReasoningDetails) {
       state.assistantReasoningDetails.open = false;
@@ -1162,18 +1237,26 @@ function attachFileHandling() {
   const dropzone = el("dropzone");
 
   el("attachmentToggle").addEventListener("click", () => {
+    if (state.requestInProgress) return;
     setAttachmentTrayOpen(el("attachmentTray").hidden);
   });
 
   input.addEventListener("change", async (event) => {
+    if (state.requestInProgress) {
+      event.target.value = "";
+      return;
+    }
     await ingestFiles(event.target.files || []);
+    event.target.value = "";
   });
 
-  dropzone.addEventListener("click", () => input.click());
+  dropzone.addEventListener("click", () => {
+    if (!state.requestInProgress) input.click();
+  });
   dropzone.addEventListener("keydown", (event) => {
     if (event.key === "Enter" || event.key === " ") {
       event.preventDefault();
-      input.click();
+      if (!state.requestInProgress) input.click();
     }
   });
 
@@ -1192,6 +1275,7 @@ function attachFileHandling() {
   dropzone.addEventListener("drop", async (event) => {
     event.preventDefault();
     setDragState(false);
+    if (state.requestInProgress) return;
     await ingestFiles(event.dataTransfer?.files || []);
   });
 }
@@ -1242,6 +1326,7 @@ el("prompt").addEventListener("paste", (event) => {
         .filter(Boolean);
 
   if (pastedImages.length) {
+    if (state.requestInProgress) return;
     event.preventDefault();
     ingestFiles(pastedImages, { append: true, pasted: true });
     return;
