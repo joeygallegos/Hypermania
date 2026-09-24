@@ -25,7 +25,7 @@ npm install
 npm start
 ```
 
-Then open [http://localhost:3000](http://localhost:3000). By default, Hypermania connects to Ollama at `http://127.0.0.1:11434`.
+Then open [http://localhost:3111](http://localhost:3111). By default, Hypermania connects to Ollama at `http://127.0.0.1:11434`.
 
 > The app has no production npm dependencies. Sass is installed as a development dependency to compile the stylesheet before startup.
 
@@ -35,7 +35,7 @@ Hypermania reads these environment variables at startup:
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `PORT` | `3000` | Port for the Hypermania web server. |
+| `PORT` | `3111` | Port for the Hypermania web server. |
 | `OLLAMA_BASE` | `http://127.0.0.1:11434` | Base URL of the Ollama server. |
 
 macOS and Linux:

@@ -1,69 +1,74 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Hypermania</title>
-    <link rel="stylesheet" href="/style.css" />
-  </head>
-  <body>
-    <main class="shell">
-      <section class="hero chat-hero">
-        <div class="hero-copy">
-          <h1 class="brand-logo" data-text="HYPERMANIA" aria-label="Hypermania">HYPERMANIA</h1>
-        </div>
-        <div class="hero-actions">
-          <label class="model-picker" for="model">
-            <span>Model</span>
-            <select id="model" aria-describedby="modelMeta"></select>
-          </label>
-          <a class="secondary nav-link" href="/settings.html">Settings</a>
-        </div>
-      </section>
 
-      <section class="panel chat">
-          <div class="chat-head">
-            <div id="modelMeta" class="model-meta" aria-live="polite"></div>
-          </div>
-          <select id="thinkMode" hidden aria-hidden="true"></select>
-          <select id="contextSize" hidden aria-hidden="true">
-            <option value="4096">4k</option>
-            <option value="8192">8k</option>
-            <option value="16384">16k</option>
-            <option value="32768">32k</option>
-          </select>
-          <div id="status" class="visually-hidden" aria-live="polite"></div>
-          <div id="errorBox" class="error-box" hidden>
-            <strong>Error</strong>
-            <p id="errorMessage"></p>
-            <div id="errorHint" class="error-hint"></div>
-          </div>
-          <div id="messages" class="messages" aria-live="polite"></div>
-          <div class="composer">
-            <div id="attachmentTray" class="attachment-tray" hidden>
-              <div id="dropzone" class="dropzone compact" tabindex="0" role="button" aria-label="Drop images or PDF files here or click to browse; paste images into the message box">
-                <input id="images" type="file" accept="image/*,application/pdf,.pdf" multiple hidden />
-                <div class="dropzone-copy">
-                  <strong id="dropLabel">Drop images or PDFs here, click to browse, or paste images in the message box</strong>
-                  <span class="hint" id="dropHint">PNG, JPG, WEBP, GIF, PDF (up to 32 pages)</span>
-                </div>
-              </div>
-              <div id="preview" class="preview"></div>
-            </div>
-            <label class="composer-field">
-              <span class="visually-hidden">Message</span>
-              <textarea id="prompt" rows="4" placeholder="Ask a question about an image or PDF, or just chat..."></textarea>
-            </label>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Hypermania</title>
+  <link rel="stylesheet" href="/style.css" />
+</head>
 
-            <div class="composer-actions">
-              <button id="attachmentToggle" type="button" class="secondary attachment-toggle" aria-expanded="false" aria-controls="attachmentTray">+ Add images or PDF</button>
-              <button id="send" type="button">Send to Ollama</button>
+<body>
+  <main class="shell">
+    <section class="hero chat-hero">
+      <div class="hero-copy">
+        <h1 class="brand-logo" data-text="HYPERMANIA" aria-label="Hypermania">HYPERMANIA</h1>
+      </div>
+      <div class="hero-actions">
+        <label class="model-picker" for="model">
+          <select id="model" aria-describedby="modelMeta"></select>
+        </label>
+        <a class="secondary nav-link" href="/settings.html">Settings</a>
+      </div>
+    </section>
+
+    <section class="panel chat">
+      <div class="chat-head">
+        <div id="modelMeta" class="model-meta" aria-live="polite"></div>
+      </div>
+      <select id="thinkMode" hidden aria-hidden="true"></select>
+      <select id="contextSize" hidden aria-hidden="true">
+        <option value="4096">4k</option>
+        <option value="8192">8k</option>
+        <option value="16384">16k</option>
+        <option value="32768">32k</option>
+      </select>
+      <div id="status" class="visually-hidden" aria-live="polite"></div>
+      <div id="errorBox" class="error-box" hidden>
+        <strong>Error</strong>
+        <p id="errorMessage"></p>
+        <div id="errorHint" class="error-hint"></div>
+      </div>
+      <div id="messages" class="messages" aria-live="polite"></div>
+      <div class="composer">
+        <div id="attachmentTray" class="attachment-tray" hidden>
+          <div id="dropzone" class="dropzone compact" tabindex="0" role="button"
+            aria-label="Drop images or PDF files here or click to browse; paste images into the message box">
+            <input id="images" type="file" accept="image/*,application/pdf,.pdf" multiple hidden />
+            <div class="dropzone-copy">
+              <strong id="dropLabel">Drop images or PDFs here, click to browse, or paste images in the message
+                box</strong>
+              <span class="hint" id="dropHint">PNG, JPG, WEBP, GIF, PDF (up to 32 pages)</span>
             </div>
           </div>
-      </section>
-    </main>
+          <div id="preview" class="preview"></div>
+        </div>
+        <label class="composer-field">
+          <span class="visually-hidden">Message</span>
+          <textarea id="prompt" rows="4" placeholder="Ask a question about an image or PDF, or just chat..."></textarea>
+        </label>
 
-    <script src="/preferences.js"></script>
-    <script src="/app.js"></script>
-  </body>
+        <div class="composer-actions">
+          <button id="attachmentToggle" type="button" class="secondary attachment-toggle" aria-expanded="false"
+            aria-controls="attachmentTray">+ Add images or PDF</button>
+          <button id="send" type="button">Send to Ollama</button>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <script src="/preferences.js"></script>
+  <script src="/app.js"></script>
+</body>
+
 </html>
