@@ -105,6 +105,27 @@ body::after {
   align-items: center;
 }
 
+// Equal outer tracks keep the model centered independently of the different
+// widths of the brand and Settings link. The wrapper contributes its children
+// directly to this grid so each header control has its own alignment role.
+.chat-hero {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(280px, 340px) minmax(0, 1fr);
+  align-items: end;
+}
+
+.chat-hero .hero-actions {
+  display: contents;
+}
+
+.chat-hero .hero-copy {
+  align-self: center;
+}
+
+.chat-hero .nav-link {
+  justify-self: end;
+}
+
 .nav-link {
   display: inline-flex;
   align-items: center;
@@ -1062,6 +1083,32 @@ button.secondary {
     align-items: end;
   }
 
+  // Below the single-row layout's safe width, move the brand above the controls.
+  // The controls keep the same equal-track centering until the mobile stack.
+  .chat-hero {
+    display: flex;
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .chat-hero .hero-copy {
+    align-self: stretch;
+  }
+
+  .chat-hero .hero-actions {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(280px, 340px) minmax(0, 1fr);
+    width: 100%;
+  }
+
+  .chat-hero .model-picker {
+    grid-column: 2;
+  }
+
+  .chat-hero .nav-link {
+    grid-column: 3;
+  }
+
   .hero-meta,
   .hero-actions {
     justify-content: space-between;
@@ -1140,7 +1187,8 @@ button.secondary {
     align-items: stretch;
   }
 
-  .hero-actions {
+  .chat-hero .hero-actions {
+    display: flex;
     flex-direction: column;
     align-items: stretch;
   }
