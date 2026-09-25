@@ -2,6 +2,7 @@ const http = require("http");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
+const { randomUUID } = require("crypto");
 const { execFile } = require("child_process");
 const { promisify } = require("util");
 
@@ -12,8 +13,13 @@ const execFileAsync = promisify(execFile);
 const MAX_PDF_BYTES = 25 * 1024 * 1024;
 const MAX_PDF_PAGES = 32;
 const MAX_RENDERED_PDF_BYTES = 40 * 1024 * 1024;
+const MAX_CHAT_JOBS = 50;
+const MAX_CHAT_JOB_CHARS = 8 * 1024 * 1024;
+const MAX_CHAT_JOB_RUNTIME_MS = 30 * 60 * 1000;
+const CHAT_JOB_RETENTION_MS = 6 * 60 * 60 * 1000;
 // The JSON request contains base64, which expands the allowed PDF before validation.
 const MAX_PDF_REQUEST_BYTES = Math.ceil((MAX_PDF_BYTES * 4) / 3) + 1024 * 1024;
+const chatJobs = new Map();
 
 class PdfInputError extends Error { }
 
@@ -375,6 +381,186 @@ async function proxy(req, res, targetPath)
   }
 }
 
+function pruneChatJobs(reserveSlot = false)
+{
+  const cutoff = Date.now() - CHAT_JOB_RETENTION_MS;
+  for (const [id, job] of chatJobs)
+  {
+    if (job.status !== "running" && job.updatedAt < cutoff)
+    {
+      chatJobs.delete(id);
+    }
+  }
+
+  if (reserveSlot && chatJobs.size >= MAX_CHAT_JOBS)
+  {
+    // Prefer evicting the oldest terminal response over rejecting a new chat.
+    // Running jobs are never evicted because that would strand their clients.
+    const completed = [...chatJobs.values()]
+      .filter((job) => job.status !== "running")
+      .sort((left, right) => left.updatedAt - right.updatedAt);
+    while (chatJobs.size >= MAX_CHAT_JOBS && completed.length)
+    {
+      chatJobs.delete(completed.shift().id);
+    }
+  }
+}
+
+function appendChatJobData(job, text)
+{
+  if (!text) return;
+  if (job.data.length + text.length > MAX_CHAT_JOB_CHARS)
+  {
+    throw new Error("The model response exceeded the recoverable response limit.");
+  }
+  // Offsets use JavaScript string positions end-to-end. This keeps UTF-8 chunks
+  // safe even when Ollama splits a multibyte character across network reads.
+  job.data += text;
+  job.updatedAt = Date.now();
+}
+
+async function runChatJob(job, body)
+{
+  // Mobile browsers may suspend or discard their response connection. Owning
+  // the Ollama stream here lets clients reconnect without starting a second
+  // generation or losing chunks produced while the tab was in the background.
+  let reader;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), MAX_CHAT_JOB_RUNTIME_MS);
+  try
+  {
+    const response = await fetch(`${ollamaBase}/api/chat`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body,
+      signal: controller.signal,
+    });
+
+    if (!response.ok)
+    {
+      const details = await response.text();
+      throw new Error(details || `Ollama returned HTTP ${response.status}.`);
+    }
+    if (!response.body)
+    {
+      throw new Error("Ollama returned an empty response.");
+    }
+
+    reader = response.body.getReader();
+    const decoder = new TextDecoder();
+    while (true)
+    {
+      const { done, value } = await reader.read();
+      if (done) break;
+      appendChatJobData(job, decoder.decode(value, { stream: true }));
+    }
+    appendChatJobData(job, decoder.decode());
+    job.status = "complete";
+  } catch (error)
+  {
+    job.status = "failed";
+    job.error = error.name === "AbortError"
+      ? "The model request exceeded the 30-minute response limit."
+      : error.message || "The model request failed.";
+    if (reader) await reader.cancel().catch(() => { });
+  } finally
+  {
+    clearTimeout(timeout);
+    if (reader) reader.releaseLock();
+    job.updatedAt = Date.now();
+    await appendLog({
+      source: "chat_job",
+      event: "finished",
+      jobId: job.id,
+      status: job.status,
+      chars: job.data.length,
+      error: job.error || undefined,
+    }).catch(() => { });
+  }
+}
+
+async function handleChatJobs(req, res)
+{
+  const requestUrl = new URL(req.url, "http://localhost");
+  pruneChatJobs(req.method === "POST" && requestUrl.pathname === "/api/chat/jobs");
+
+  if (requestUrl.pathname === "/api/chat/jobs")
+  {
+    if (req.method !== "POST")
+    {
+      sendJson(res, 405, { error: "Method not allowed" });
+      return;
+    }
+    if (chatJobs.size >= MAX_CHAT_JOBS)
+    {
+      sendJson(res, 503, { error: "Too many responses are being retained. Try again later." });
+      return;
+    }
+
+    const body = await readBody(req);
+    let payload;
+    try
+    {
+      payload = JSON.parse(body.toString("utf8"));
+    } catch
+    {
+      sendJson(res, 400, { error: "Invalid chat request." });
+      return;
+    }
+    if (!payload || typeof payload !== "object" || Array.isArray(payload))
+    {
+      sendJson(res, 400, { error: "Invalid chat request." });
+      return;
+    }
+
+    payload.stream = true;
+    const job = {
+      id: randomUUID(),
+      status: "running",
+      data: "",
+      error: "",
+      updatedAt: Date.now(),
+    };
+    chatJobs.set(job.id, job);
+    sendJson(res, 202, { id: job.id });
+    runChatJob(job, Buffer.from(JSON.stringify(payload))).catch(() => { });
+    return;
+  }
+
+  const match = requestUrl.pathname.match(/^\/api\/chat\/jobs\/([a-f0-9-]{36})$/i);
+  if (!match)
+  {
+    sendJson(res, 404, { error: "Chat response not found." });
+    return;
+  }
+  if (req.method !== "GET")
+  {
+    sendJson(res, 405, { error: "Method not allowed" });
+    return;
+  }
+
+  const job = chatJobs.get(match[1]);
+  if (!job)
+  {
+    sendJson(res, 404, { error: "This response is no longer available." });
+    return;
+  }
+
+  const offset = Number(requestUrl.searchParams.get("offset") || 0);
+  if (!Number.isInteger(offset) || offset < 0 || offset > job.data.length)
+  {
+    sendJson(res, 416, { error: "Invalid response offset." });
+    return;
+  }
+
+  sendJson(res, 200, {
+    status: job.status,
+    offset: job.data.length,
+    data: job.data.slice(offset),
+    ...(job.error ? { error: job.error } : {}),
+  });
+}
+
 function isLoopbackRequest(req)
 {
   const address = req.socket.remoteAddress || "";
@@ -467,6 +653,12 @@ const server = http.createServer(async (req, res) =>
     if (req.url.startsWith("/api/pdf/render"))
     {
       await handlePdfRender(req, res);
+      return;
+    }
+
+    if (req.url.startsWith("/api/chat/jobs"))
+    {
+      await handleChatJobs(req, res);
       return;
     }
 

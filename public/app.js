@@ -1,6 +1,10 @@
 const state = {
   requestSeq: 0,
   history: [],
+  conversations: [],
+  activeConversation: null,
+  preferredConversationModel: "",
+  historyAvailable: true,
   images: [],
   pdfs: [],
   models: [],
@@ -22,6 +26,19 @@ const state = {
 };
 
 const el = (id) => document.getElementById(id);
+const {
+  conversationTitle,
+  isValidConversationSummary,
+  isValidHistoryMessage,
+} = window.hypermaniaChatHistory;
+const CHAT_DB_NAME = "hypermania-chats";
+const CHAT_DB_VERSION = 1;
+const CHAT_SCHEMA_VERSION = 1;
+const CHAT_JOB_POLL_MS = 400;
+const CHAT_JOB_HIDDEN_POLL_MS = 2000;
+const CHAT_JOB_FETCH_TIMEOUT_MS = 15000;
+const CHAT_JOB_VISIBLE_RETRY_MS = 30000;
+let chatDbPromise;
 
 function debugLog(event, details = {}) {
   const payload = {
@@ -36,6 +53,380 @@ function debugLog(event, details = {}) {
     body: JSON.stringify(payload),
     keepalive: true,
   }).catch(() => {});
+}
+
+function requestResult(request) {
+  return new Promise((resolve, reject) => {
+    request.addEventListener("success", () => resolve(request.result), { once: true });
+    request.addEventListener("error", () => reject(request.error), { once: true });
+  });
+}
+
+function transactionComplete(transaction) {
+  return new Promise((resolve, reject) => {
+    transaction.addEventListener("complete", resolve, { once: true });
+    transaction.addEventListener("abort", () => reject(transaction.error || new Error("Chat storage was interrupted.")), { once: true });
+    transaction.addEventListener("error", () => reject(transaction.error || new Error("Chat storage failed.")), { once: true });
+  });
+}
+
+function openChatDatabase() {
+  if (chatDbPromise) return chatDbPromise;
+
+  chatDbPromise = new Promise((resolve, reject) => {
+    const request = indexedDB.open(CHAT_DB_NAME, CHAT_DB_VERSION);
+    let blocked = false;
+
+    request.addEventListener("upgradeneeded", () => {
+      const database = request.result;
+      // Keep small sidebar metadata separate from message payloads. Otherwise,
+      // listing chat titles would clone every saved image out of IndexedDB.
+      if (!database.objectStoreNames.contains("conversations")) {
+        database.createObjectStore("conversations", { keyPath: "id" });
+      }
+      if (!database.objectStoreNames.contains("conversationData")) {
+        database.createObjectStore("conversationData", { keyPath: "id" });
+      }
+    });
+    request.addEventListener("success", () => {
+      if (blocked) {
+        request.result.close();
+        return;
+      }
+      request.result.addEventListener("versionchange", () => request.result.close());
+      resolve(request.result);
+    }, { once: true });
+    request.addEventListener("error", () => reject(request.error), { once: true });
+    request.addEventListener("blocked", () => {
+      blocked = true;
+      reject(new Error("Close other Hypermania tabs and try again."));
+    }, { once: true });
+  });
+
+  return chatDbPromise;
+}
+
+function makeConversationId() {
+  if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
+  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+}
+
+function formatConversationDate(value) {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return "Saved chat";
+  return new Intl.DateTimeFormat(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  }).format(date);
+}
+
+function renderConversationList() {
+  const list = el("conversationList");
+  list.replaceChildren();
+  el("emptyHistory").hidden = state.conversations.length > 0;
+
+  for (const conversation of state.conversations) {
+    const item = document.createElement("li");
+    item.className = "conversation-item";
+    if (conversation.id === state.activeConversation?.id) item.classList.add("active");
+
+    const openButton = document.createElement("button");
+    openButton.type = "button";
+    openButton.className = "conversation-open";
+    openButton.disabled = state.requestInProgress;
+    if (conversation.id === state.activeConversation?.id) openButton.setAttribute("aria-current", "true");
+
+    const title = document.createElement("span");
+    title.className = "conversation-title";
+    title.textContent = conversation.title;
+    const date = document.createElement("span");
+    date.className = "conversation-date";
+    date.textContent = formatConversationDate(conversation.updatedAt);
+    openButton.append(title, date);
+    openButton.addEventListener("click", () => selectConversation(conversation.id));
+
+    const deleteButton = document.createElement("button");
+    deleteButton.type = "button";
+    deleteButton.className = "conversation-delete";
+    deleteButton.textContent = "Delete";
+    deleteButton.disabled = state.requestInProgress;
+    deleteButton.setAttribute("aria-label", `Delete ${conversation.title}`);
+    deleteButton.addEventListener("click", () => deleteConversation(conversation));
+
+    item.append(openButton, deleteButton);
+    list.appendChild(item);
+  }
+}
+
+function updateActiveChatHeading() {
+  el("activeChatTitle").textContent = state.activeConversation?.title || "New chat";
+}
+
+function markActiveChatUnsaved() {
+  const title = state.activeConversation?.title || conversationTitle(state.history);
+  el("activeChatTitle").textContent = `${title} — not saved`;
+}
+
+function resetDraft() {
+  state.images = [];
+  state.pdfs = [];
+  el("images").value = "";
+  el("prompt").value = "";
+  renderPreview();
+  setDropLabel();
+  setAttachmentTrayOpen(false);
+}
+
+function hasDraft() {
+  return Boolean(el("prompt").value.trim() || state.images.length || state.pdfs.length);
+}
+
+function confirmDraftDiscard(action) {
+  return !hasDraft() || window.confirm(`Discard the unsent draft and ${action}?`);
+}
+
+function startNewConversation({ focus = true, confirmDraft = true } = {}) {
+  if (state.requestInProgress) return;
+  if (confirmDraft && !confirmDraftDiscard("start a new chat")) return;
+  state.history = [];
+  state.activeConversation = null;
+  state.preferredConversationModel = "";
+  el("messages").replaceChildren();
+  resetDraft();
+  clearError();
+  updateActiveChatHeading();
+  renderConversationList();
+  if (focus) el("prompt").focus();
+}
+
+function renderStoredConversation(conversation) {
+  const messages = el("messages");
+  // Rehydrating a long chat should not cause an aria-live region to announce
+  // every historical message as though each one had just arrived.
+  messages.setAttribute("aria-live", "off");
+  messages.replaceChildren();
+
+  try {
+    for (const message of state.history) {
+      if (message.role === "user") {
+        const attachmentCount = message.images?.length || 0;
+        const attachmentNote = attachmentCount
+          ? `\n\n[${attachmentCount} saved attachment${attachmentCount === 1 ? "" : "s"}]`
+          : "";
+        addMessage("user", `${message.content}${attachmentNote}`);
+        continue;
+      }
+
+      const assistant = createAssistantMessage(`model: ${conversation.model}`, "saved response");
+      assistant.pending.remove();
+      assistant.answerNode.classList.remove("is-pending");
+      const thinking = cleanThinkingText(message.thinking || "");
+      if (thinking) {
+        assistant.reasoningPre.textContent = thinking;
+      } else {
+        assistant.reasoningRow.remove();
+      }
+      if (message.content) {
+        renderMarkdown(assistant.answerPre, message.content);
+      } else {
+        setAssistantAnswerText(assistant.answerPre, thinking
+          ? "(Reasoning only; open the collapsed thoughts below.)"
+          : "(Model returned no visible answer.)");
+      }
+    }
+    scrollMessagesToBottom();
+  } finally {
+    messages.setAttribute("aria-live", "polite");
+  }
+  setStatus(`Opened ${conversation.title}.`);
+}
+
+function applyConversationModel(model) {
+  if (!model) return;
+  state.preferredConversationModel = model;
+  const select = el("model");
+  const available = [...select.options].some((option) => option.value === model);
+  if (!available) {
+    if (select.options.length) {
+      showError("The saved model is not currently installed.", `This chat is open with ${select.value || "the available model"} selected instead.`);
+    }
+    return;
+  }
+
+  select.value = model;
+  window.hypermaniaPreferences.setModel(model);
+  renderModelMeta();
+  renderThinkOptions(model, state.modelInfo.get(model));
+  if (!state.modelInfo.has(model)) refreshModelInfo(model, true);
+}
+
+async function selectConversation(id, { focus = true, confirmDraft = true } = {}) {
+  if (state.requestInProgress) return;
+  const conversation = state.conversations.find((candidate) => candidate.id === id);
+  if (!conversation) return;
+  if (state.activeConversation?.id === id) {
+    if (focus) el("prompt").focus();
+    return;
+  }
+  if (confirmDraft && !confirmDraftDiscard("open another chat")) return;
+
+  try {
+    const database = await openChatDatabase();
+    const transaction = database.transaction("conversationData", "readonly");
+    const record = await requestResult(transaction.objectStore("conversationData").get(id));
+    if (!record || record.schemaVersion !== CHAT_SCHEMA_VERSION || !Array.isArray(record.history)
+      || !record.history.every(isValidHistoryMessage)) {
+      throw new Error("This saved chat is damaged or uses an unsupported format.");
+    }
+
+    state.activeConversation = conversation;
+    state.history = record.history;
+    resetDraft();
+    clearError();
+    updateActiveChatHeading();
+    renderStoredConversation(conversation);
+    renderConversationList();
+    applyConversationModel(conversation.model);
+    if (focus) el("prompt").focus();
+  } catch (error) {
+    showError("Could not open this chat.", error.message || "Browser storage could not be read.");
+  }
+}
+
+async function persistCurrentConversation() {
+  if (!state.historyAvailable || !state.history.length) return;
+  const database = await openChatDatabase();
+  const now = new Date().toISOString();
+  const conversation = state.activeConversation || {
+    id: makeConversationId(),
+    title: conversationTitle(state.history),
+    createdAt: now,
+    updatedAt: now,
+    model: "",
+    revision: 0,
+  };
+
+  const transaction = database.transaction(["conversations", "conversationData"], "readwrite");
+  const completion = transactionComplete(transaction);
+  // Observe rejections immediately even if an earlier request in the transaction
+  // throws before execution reaches the final await.
+  completion.catch(() => {});
+  const conversationStore = transaction.objectStore("conversations");
+  const storedSummary = await requestResult(conversationStore.get(conversation.id));
+
+  // A revision mismatch means another tab updated or deleted this chat. Failing
+  // visibly preserves both versions instead of silently overwriting newer data.
+  if ((state.activeConversation && storedSummary?.revision !== conversation.revision)
+    || (!state.activeConversation && storedSummary)) {
+    transaction.abort();
+    await completion.catch(() => {});
+    throw new Error("This chat changed in another tab. Reload it before saving another response.");
+  }
+
+  const summary = {
+    ...conversation,
+    updatedAt: now,
+    model: el("model").value,
+    revision: (storedSummary?.revision || 0) + 1,
+  };
+  // Metadata and the complete Ollama context commit together, so a sidebar item
+  // can never point at a partially written conversation after a failed write.
+  conversationStore.put(summary);
+  transaction.objectStore("conversationData").put({
+    id: summary.id,
+    schemaVersion: CHAT_SCHEMA_VERSION,
+    history: state.history,
+  });
+  await completion;
+
+  state.activeConversation = summary;
+  state.preferredConversationModel = summary.model;
+  state.conversations = [summary, ...state.conversations.filter((candidate) => candidate.id !== summary.id)]
+    .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+  updateActiveChatHeading();
+  renderConversationList();
+}
+
+async function persistCurrentConversationSafely() {
+  if (!state.historyAvailable) {
+    markActiveChatUnsaved();
+    showError(
+      "This chat is not being saved.",
+      "Saved chats are unavailable in this browser, so this conversation will last only until the page closes."
+    );
+    return;
+  }
+
+  try {
+    await persistCurrentConversation();
+  } catch (error) {
+    // Persistence is deliberately outside the model-request failure path. The
+    // completed answer remains usable in this tab even when storage is full.
+    markActiveChatUnsaved();
+    debugLog("conversation_save_error", { message: error.message || String(error) });
+    showError(
+      "This response finished, but the chat could not be saved.",
+      error.message || "It is still visible in this tab. Browser storage may be full or unavailable."
+    );
+  }
+}
+
+async function deleteConversation(conversation) {
+  if (state.requestInProgress) return;
+  const draftWarning = state.activeConversation?.id === conversation.id && hasDraft()
+    ? " Your unsent draft will also be discarded."
+    : "";
+  if (!window.confirm(`Delete “${conversation.title}”? This cannot be undone.${draftWarning}`)) return;
+
+  try {
+    const database = await openChatDatabase();
+    // Delete the lightweight summary and the potentially large context in the
+    // same transaction so neither can be left orphaned.
+    const transaction = database.transaction(["conversations", "conversationData"], "readwrite");
+    transaction.objectStore("conversations").delete(conversation.id);
+    transaction.objectStore("conversationData").delete(conversation.id);
+    await transactionComplete(transaction);
+
+    state.conversations = state.conversations.filter((candidate) => candidate.id !== conversation.id);
+    if (state.activeConversation?.id === conversation.id) {
+      // Clear the deleted context before opening a fallback. If that fallback is
+      // corrupt, the deleted chat must not remain resumable in memory.
+      startNewConversation({ focus: false, confirmDraft: false });
+      if (state.conversations.length) {
+        await selectConversation(state.conversations[0].id, { confirmDraft: false });
+      }
+    } else {
+      renderConversationList();
+    }
+    setStatus("Chat deleted.");
+  } catch (error) {
+    showError("Could not delete this chat.", error.message || "Browser storage could not be updated.");
+  }
+}
+
+async function loadConversationHistory() {
+  try {
+    const database = await openChatDatabase();
+    const transaction = database.transaction("conversations", "readonly");
+    const conversations = await requestResult(transaction.objectStore("conversations").getAll());
+    state.conversations = conversations
+      .filter(isValidConversationSummary)
+      .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    renderConversationList();
+    if (state.conversations.length) {
+      await selectConversation(state.conversations[0].id, { focus: false, confirmDraft: false });
+    }
+  } catch (error) {
+    state.historyAvailable = false;
+    renderConversationList();
+    showError(
+      "Saved chats are unavailable in this browser.",
+      "You can still chat, but conversations will last only until this page closes."
+    );
+    debugLog("conversation_load_error", { message: error.message || String(error) });
+  }
 }
 
 function getContextLength() {
@@ -84,9 +475,16 @@ function setBusy(isBusy, statusText = "") {
 
   const attachmentToggle = el("attachmentToggle");
   const dropzone = el("dropzone");
+  el("model").disabled = isBusy;
   attachmentToggle.disabled = isBusy;
   dropzone.classList.toggle("disabled", isBusy);
   dropzone.setAttribute("aria-disabled", String(isBusy));
+  // A late streaming response belongs to the active chat. Lock navigation until
+  // it is saved so it cannot land in, or resurrect, a different conversation.
+  el("newChat").disabled = isBusy;
+  el("conversationList").querySelectorAll("button").forEach((button) => {
+    button.disabled = isBusy;
+  });
 }
 
 function clearError() {
@@ -717,9 +1115,16 @@ async function loadModels() {
       select.appendChild(option);
     }
 
-    const savedModel = window.hypermaniaPreferences.getModel();
+    const savedModel = state.preferredConversationModel || window.hypermaniaPreferences.getModel();
     select.value = state.models.includes(savedModel) ? savedModel : fallback;
     window.hypermaniaPreferences.setModel(select.value);
+
+    if (state.preferredConversationModel && !state.models.includes(state.preferredConversationModel)) {
+      showError(
+        "The saved model is not currently installed.",
+        `This chat is open with ${select.value} selected instead.`
+      );
+    }
 
     await refreshModelInfo(select.value, true);
     renderThinkOptions(select.value, state.modelInfo.get(select.value));
@@ -884,40 +1289,34 @@ function imageSupportHint(modelName) {
 
 async function streamChat(model, messages, thinkValue) {
   const requestBody = buildRequestBody(model, messages, thinkValue, true);
-
-  const res = await fetch("/api/chat", {
+  const startResponse = await fetch("/api/chat/jobs", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(requestBody),
   });
 
-  if (!res.ok) {
-    const body = await res.text();
-    throw new Error(extractErrorDetails(body) || `HTTP ${res.status}`);
+  if (!startResponse.ok) {
+    const body = await startResponse.text();
+    throw new Error(extractErrorDetails(body) || `HTTP ${startResponse.status}`);
   }
+  const { id: jobId } = await startResponse.json();
+  if (!jobId) throw new Error("Hypermania did not return a response ID.");
+
   debugLog("stream_started", {
     requestId: state.activeRequestId,
+    jobId,
     model,
     thinkValue: thinkValue === undefined ? "default" : String(thinkValue),
   });
 
-  const reader = res.body?.getReader();
-  if (!reader) {
-    const data = await res.json();
-    return data.message?.content || "";
-  }
-
-  const decoder = new TextDecoder();
   let buffer = "";
   let full = "";
   let thinkingFull = "";
   let sawFirstChunk = false;
+  let offset = 0;
+  let visibleDisconnectedAt = 0;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-
+  function consumeBufferedLines(includeTrailing = false) {
     let newlineIndex = buffer.indexOf("\n");
     while (newlineIndex !== -1) {
       const line = buffer.slice(0, newlineIndex).trim();
@@ -954,6 +1353,7 @@ async function streamChat(model, messages, thinkValue) {
             }
           }
           if (chunk.message?.content) {
+            const isFirstAnswerChunk = !sawFirstChunk;
             if (!sawFirstChunk && state.assistantWait) {
               state.assistantWait.remove();
               state.assistantWait = null;
@@ -966,7 +1366,7 @@ async function streamChat(model, messages, thinkValue) {
               setAssistantAnswerText(state.assistantPre, full);
             }
             touchGeneration("answer");
-            if (!sawFirstChunk) {
+            if (isFirstAnswerChunk) {
               debugLog("stream_answer_seen", {
                 requestId: state.activeRequestId,
                 chars: full.length,
@@ -978,50 +1378,108 @@ async function streamChat(model, messages, thinkValue) {
       newlineIndex = buffer.indexOf("\n");
     }
 
+    if (includeTrailing) {
+      const trailing = buffer.trim();
+      buffer = "";
+      if (trailing) {
+        let chunk;
+        try {
+          chunk = JSON.parse(trailing);
+        } catch {
+          chunk = null;
+        }
+
+        if (chunk?.error) throw new Error(extractErrorDetails(chunk.error));
+        if (chunk?.message?.thinking) {
+          thinkingFull += chunk.message.thinking;
+          if (state.assistantReasoningPre) state.assistantReasoningPre.textContent = thinkingFull;
+          touchGeneration("thinking");
+        }
+        if (chunk?.message?.content) {
+          if (!sawFirstChunk && state.assistantWait) {
+            state.assistantWait.remove();
+            state.assistantWait = null;
+            state.assistantWaitLabel = null;
+            state.assistantPendingBubble?.classList.remove("is-pending");
+          }
+          sawFirstChunk = true;
+          full += chunk.message.content;
+          if (state.assistantPre) setAssistantAnswerText(state.assistantPre, full);
+          touchGeneration("answer");
+        }
+      }
+    }
+  }
+
+  async function waitForNextPoll() {
+    await new Promise((resolve) => {
+      const finish = () => {
+        clearTimeout(timer);
+        document.removeEventListener("visibilitychange", finish);
+        resolve();
+      };
+      const timer = setTimeout(finish, document.hidden ? CHAT_JOB_HIDDEN_POLL_MS : CHAT_JOB_POLL_MS);
+      document.addEventListener("visibilitychange", finish, { once: true });
+    });
+  }
+
+  while (true) {
+    let update;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), CHAT_JOB_FETCH_TIMEOUT_MS);
+    try {
+      // Every successful poll advances an immutable offset. If Chrome suspends
+      // this fetch, retrying the same offset safely requests only missed text.
+      const response = await fetch(`/api/chat/jobs/${encodeURIComponent(jobId)}?offset=${offset}`, {
+        cache: "no-store",
+        signal: controller.signal,
+      });
+      if (!response.ok) {
+        const body = await response.text();
+        const responseError = new Error(extractErrorDetails(body) || `HTTP ${response.status}`);
+        responseError.retryable = response.status >= 500;
+        throw responseError;
+      }
+      update = await response.json();
+      visibleDisconnectedAt = 0;
+    } catch (error) {
+      if (error.retryable === false) throw error;
+      if (document.hidden) {
+        // Give the network a fresh recovery window after a suspended tab becomes
+        // visible; time spent frozen in the background must not consume it.
+        visibleDisconnectedAt = 0;
+      } else if (!visibleDisconnectedAt) {
+        visibleDisconnectedAt = Date.now();
+      }
+      const retryExpired = visibleDisconnectedAt
+        && Date.now() - visibleDisconnectedAt >= CHAT_JOB_VISIBLE_RETRY_MS;
+      if (retryExpired) {
+        throw new Error("Could not reconnect to the in-progress response.");
+      }
+      if (state.assistantWaitLabel) state.assistantWaitLabel.textContent = "Reconnecting…";
+      setBusy(true, document.hidden ? "Response continues in the background…" : "Reconnecting to response…");
+      await waitForNextPoll();
+      continue;
+    } finally {
+      clearTimeout(timeout);
+    }
+
+    if (!Number.isInteger(update.offset) || update.offset < offset || typeof update.data !== "string") {
+      throw new Error("Hypermania returned an invalid response update.");
+    }
+    offset = update.offset;
+    buffer += update.data;
+    consumeBufferedLines(update.status === "complete" || update.status === "failed");
+
     if (state.assistantPre && !sawFirstChunk) {
       setAssistantAnswerText(state.assistantPre, "");
       scrollMessagesToBottom();
     }
-  }
-
-  const trailing = buffer.trim();
-  if (trailing) {
-    let chunk;
-    try {
-      chunk = JSON.parse(trailing);
-    } catch {
-      chunk = null;
+    if (update.status === "failed") {
+      throw new Error(extractErrorDetails(update.error || "The model request failed."));
     }
-
-    if (chunk) {
-      if (chunk.error) {
-        throw new Error(extractErrorDetails(chunk.error));
-      }
-      if (chunk.message?.thinking) {
-        if (state.assistantWaitLabel) {
-          state.assistantWaitLabel.textContent = "Thinking…";
-        }
-        thinkingFull += chunk.message.thinking;
-        if (state.assistantReasoningPre) {
-          state.assistantReasoningPre.textContent = thinkingFull;
-        }
-        touchGeneration("thinking");
-      }
-      if (chunk.message?.content) {
-        if (!sawFirstChunk && state.assistantWait) {
-          state.assistantWait.remove();
-          state.assistantWait = null;
-          state.assistantWaitLabel = null;
-          state.assistantPendingBubble?.classList.remove("is-pending");
-        }
-        sawFirstChunk = true;
-        full += chunk.message.content;
-        if (state.assistantPre) {
-          setAssistantAnswerText(state.assistantPre, full);
-        }
-        touchGeneration("answer");
-      }
-    }
+    if (update.status === "complete") break;
+    await waitForNextPoll();
   }
 
   if (state.assistantWait) {
@@ -1104,15 +1562,16 @@ async function sendChat() {
   state.requestInProgress = true;
   let submittedUserMessage = null;
 
-  addMessage(
+  const renderedUserMessage = addMessage(
     "user",
     hasAttachments ? `${userContent}\n\n[${attachmentLabel} attached]` : userContent
   );
 
   setBusy(true, pendingPdfs.length ? "Preparing PDF pages..." : "Waiting for Ollama...");
+  let assistant = null;
 
   try {
-    const assistant = createAssistantMessage(`model: ${model}`, summarizeThinkingContext(prompt, hasAttachments ? 1 : 0));
+    assistant = createAssistantMessage(`model: ${model}`, summarizeThinkingContext(prompt, hasAttachments ? 1 : 0));
     state.assistantPre = assistant.answerPre;
     state.assistantReasoningPre = assistant.reasoningPre;
     state.assistantReasoningDetails = assistant.reasoningDetails;
@@ -1181,6 +1640,9 @@ async function sendChat() {
         : "(Model returned no visible answer.)");
     }
 
+    setBusy(true, "Saving chat...");
+    await persistCurrentConversationSafely();
+
     debugLog("send_complete", {
       requestId,
       replyChars: reply.length,
@@ -1204,18 +1666,20 @@ async function sendChat() {
     const message = extractErrorDetails(error.message || String(error));
     const hint = message.toLowerCase().includes("multimodal")
       ? imageSupportHint(model)
-      : "Try again after checking the selected model and Ollama server status.";
+      : `${message} Your message and attachments are ready to send again.`;
 
-    showError(message, hint);
-    createMessage("assistant", `Error: ${message}`, "request failed");
+    // The request UI is provisional until a complete answer is saved. Removing
+    // it avoids leaving a stale Thinking indicator or duplicating the failure in
+    // both an assistant bubble and the error banner.
+    renderedUserMessage.row.remove();
+    assistant?.reasoningRow.remove();
+    assistant?.answerRow.remove();
+    showError("The response could not be completed.", hint);
     debugLog("send_error", {
       requestId,
       message,
     });
-    endGenerationMonitor(`Request failed: ${message}`);
-    if (state.assistantPre) {
-      setAssistantAnswerText(state.assistantPre, `Error: ${message}`);
-    }
+    endGenerationMonitor("Request failed. Your message is ready to retry.");
   } finally {
     state.requestInProgress = false;
     endGenerationMonitor(el("status").textContent || "Done.");
@@ -1281,6 +1745,7 @@ function attachFileHandling() {
 }
 
 el("send").addEventListener("click", sendChat);
+el("newChat").addEventListener("click", () => startNewConversation());
 
 el("model").addEventListener("change", () => {
   const model = el("model").value;
@@ -1353,5 +1818,11 @@ const contextSelect = el("contextSize");
 contextSelect.value = [...contextSelect.options].some((option) => option.value === savedContextSize) ? savedContextSize : "8192";
 state.contextSize = Number.parseInt(contextSelect.value, 10);
 window.hypermaniaPreferences.setContextSize(contextSelect.value);
-loadModels();
-debugLog("app_loaded");
+
+async function initializeApp() {
+  await loadConversationHistory();
+  await loadModels();
+  debugLog("app_loaded", { savedChatCount: state.conversations.length });
+}
+
+initializeApp();

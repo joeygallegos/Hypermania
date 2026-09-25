@@ -22,52 +22,72 @@
       </div>
     </section>
 
-    <section class="panel chat">
-      <div class="chat-head">
-        <div id="modelMeta" class="model-meta" aria-live="polite"></div>
-      </div>
-      <select id="thinkMode" hidden aria-hidden="true"></select>
-      <select id="contextSize" hidden aria-hidden="true">
-        <option value="4096">4k</option>
-        <option value="8192">8k</option>
-        <option value="16384">16k</option>
-        <option value="32768">32k</option>
-      </select>
-      <div id="status" class="visually-hidden" aria-live="polite"></div>
-      <div id="errorBox" class="error-box" hidden>
-        <strong>Error</strong>
-        <p id="errorMessage"></p>
-        <div id="errorHint" class="error-hint"></div>
-      </div>
-      <div id="messages" class="messages" aria-live="polite"></div>
-      <div class="composer">
-        <div id="attachmentTray" class="attachment-tray" hidden>
-          <div id="dropzone" class="dropzone compact" tabindex="0" role="button"
-            aria-label="Drop images or PDF files here or click to browse; paste images into the message box">
-            <input id="images" type="file" accept="image/*,application/pdf,.pdf" multiple hidden />
-            <div class="dropzone-copy">
-              <strong id="dropLabel">Drop images or PDFs here, click to browse, or paste images in the message
-                box</strong>
-              <span class="hint" id="dropHint">PNG, JPG, WEBP, GIF, PDF (up to 32 pages)</span>
-            </div>
+    <section class="chat-workspace">
+      <aside class="panel chat-history" aria-labelledby="chatHistoryTitle">
+        <div class="history-head">
+          <div>
+            <p class="section-kicker">Saved locally</p>
+            <h2 id="chatHistoryTitle">Chats</h2>
           </div>
-          <div id="preview" class="preview"></div>
+          <button id="newChat" type="button">New chat</button>
         </div>
-        <label class="composer-field">
-          <span class="visually-hidden">Message</span>
-          <textarea id="prompt" rows="4" placeholder="Ask a question about an image or PDF, or just chat..."></textarea>
-        </label>
+        <p id="emptyHistory" class="history-empty">Your completed chats will appear here.</p>
+        <ol id="conversationList" class="conversation-list" aria-label="Saved chats"></ol>
+      </aside>
 
-        <div class="composer-actions">
-          <button id="attachmentToggle" type="button" class="secondary attachment-toggle" aria-expanded="false"
-            aria-controls="attachmentTray">+ Add images or PDF</button>
-          <button id="send" type="button">Send to Ollama</button>
+      <section class="panel chat">
+        <div class="chat-head">
+          <div class="active-chat-heading">
+            <p class="section-kicker">Conversation</p>
+            <h2 id="activeChatTitle">New chat</h2>
+          </div>
+          <div id="modelMeta" class="model-meta" aria-live="polite"></div>
         </div>
-      </div>
+        <select id="thinkMode" hidden aria-hidden="true"></select>
+        <select id="contextSize" hidden aria-hidden="true">
+          <option value="4096">4k</option>
+          <option value="8192">8k</option>
+          <option value="16384">16k</option>
+          <option value="32768">32k</option>
+        </select>
+        <div id="status" class="visually-hidden" aria-live="polite"></div>
+        <div id="errorBox" class="error-box" hidden>
+          <strong>Error</strong>
+          <p id="errorMessage"></p>
+          <div id="errorHint" class="error-hint"></div>
+        </div>
+        <div id="messages" class="messages" aria-live="polite"></div>
+        <div class="composer">
+          <div id="attachmentTray" class="attachment-tray" hidden>
+            <div id="dropzone" class="dropzone compact" tabindex="0" role="button"
+              aria-label="Drop images or PDF files here or click to browse; paste images into the message box">
+              <input id="images" type="file" accept="image/*,application/pdf,.pdf" multiple hidden />
+              <div class="dropzone-copy">
+                <strong id="dropLabel">Drop images or PDFs here, click to browse, or paste images in the message
+                  box</strong>
+                <span class="hint" id="dropHint">PNG, JPG, WEBP, GIF, PDF (up to 32 pages)</span>
+              </div>
+            </div>
+            <div id="preview" class="preview"></div>
+          </div>
+          <label class="composer-field">
+            <span class="visually-hidden">Message</span>
+            <textarea id="prompt" rows="4"
+              placeholder="Ask a question about an image or PDF, or just chat..."></textarea>
+          </label>
+
+          <div class="composer-actions">
+            <button id="attachmentToggle" type="button" class="secondary attachment-toggle" aria-expanded="false"
+              aria-controls="attachmentTray">+ Add images or PDF</button>
+            <button id="send" type="button">Send to Ollama</button>
+          </div>
+        </div>
+      </section>
     </section>
   </main>
 
   <script src="/preferences.js"></script>
+  <script src="/chat-history.js"></script>
   <script src="/app.js"></script>
 </body>
 

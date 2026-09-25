@@ -5,6 +5,7 @@
   "type": "commonjs",
   "scripts": {
     "build:styles": "sass public/style.scss public/style.css --style=expanded",
+    "test": "node --test",
     "watch:styles": "sass --watch public/style.scss:public/style.css",
     "start": "npm run build:styles && node server.js"
   },

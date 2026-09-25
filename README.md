@@ -6,6 +6,7 @@ A focused, local-first chat interface for [Ollama](https://ollama.com). Hyperman
 
 - Connect to a local or trusted-network Ollama instance.
 - Stream chats live, with a model selector in chat and advanced behavior controls on a dedicated Settings page.
+- Reopen, continue, review, and delete completed conversations from local chat history.
 - Attach images or PDFs, preview the resulting pages, and send them to compatible vision models. PDFs are rendered locally into PNG page images before they reach Ollama.
 - Refresh installed models without restarting the UI.
 - Run as a small Node.js service or install it with the included Linux systemd helper.
@@ -61,8 +62,11 @@ You can also change the active endpoint from the **Settings** page using a hostn
 - **Thinking** is sent only when the selected model supports it; individual models may still ignore a chosen mode.
 - **Context length** is passed to Ollama as `options.num_ctx`. Larger contexts consume more memory or VRAM.
 - Markdown is rendered after a response completes. During streaming, content stays plain text so the layout does not jump.
+- Chat generation runs on the Hypermania server, so a mobile browser can suspend the tab and catch up on missed response chunks when it returns. Recoverable results are held in server memory for up to six hours; restarting Hypermania clears them.
 - The **Add images** tray supports selecting files and drag-and-drop. Paste clipboard images into the message box to attach them, too.
 - Press **Enter** to send a message; use **Shift+Enter** for a new line.
+- Completed conversations are saved in the browser with IndexedDB. Chat history is specific to the current browser profile and exact Hypermania address, so changing devices, browser profiles, hostnames, or ports shows a different history.
+- Use **New chat** to start a blank conversation. Select a saved chat to review or continue it, or use its **Delete** button to permanently remove it from this browser's Hypermania storage.
 - Browser events and proxy request summaries are appended to `hypermania.log` beside `server.js`.
 
 ## Linux systemd install
@@ -105,6 +109,8 @@ If you edit `hypermania.env`, restart the service for changes to apply. Re-runni
 ## Security and operations
 
 - Hypermania listens on all network interfaces, has no authentication, and permits cross-origin API requests. Keep it on a trusted network. Use a firewall and authenticated reverse proxy before exposing it externally.
+- Saved chats can include prompts, model reasoning, and attachment data. They remain unencrypted in the browser profile until deleted or browser site data is cleared; browser deletion is not guaranteed forensic erasure.
+- In-progress and recently completed responses are retained in server memory for reconnecting browsers. Retention is bounded to 50 responses, 8 million characters per response, six hours after completion, and 30 minutes of generation time.
 - The browser endpoint control may be changed only from the local machine; use `OLLAMA_BASE` for the durable default.
 - Ollama must be reachable by the machine and account running Hypermania. For the default setup, ensure `ollama serve` or the Ollama system service is running.
 - Image and PDF input requires a multimodal model. Text-only models are identified in the UI and will not receive attachments. PDF rendering requires Poppler (`pdfinfo` and `pdftoppm`) on the Hypermania server; PDFs are limited to 25 MB and 32 pages.
@@ -123,6 +129,14 @@ For live stylesheet compilation during development:
 ```bash
 npm run watch:styles
 ```
+
+Run the dependency-free core regression suite with:
+
+```bash
+npm test
+```
+
+The suite validates saved-chat data contracts and starts an isolated Hypermania server with a mock Ollama endpoint to test static assets, proxy streaming, context forwarding, configuration, and common error responses.
 
 ## Project layout
 
