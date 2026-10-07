@@ -67,7 +67,8 @@ You can also change the active endpoint from the **Settings** page using a hostn
 - Press **Enter** to send a message; use **Shift+Enter** for a new line.
 - Completed conversations are saved in the browser with IndexedDB. Chat history is specific to the current browser profile and exact Hypermania address, so changing devices, browser profiles, hostnames, or ports shows a different history.
 - Use **New chat** to start a blank conversation. Select a saved chat to review or continue it, or use its **Delete** button to permanently remove it from this browser's Hypermania storage.
-- Browser events and proxy request summaries are appended to `hypermania.log` beside `server.js`.
+- Each conversation has a stable thread ID. Each send has a separate request ID that follows its PDF rendering, model generation, retries, and log entries. Failed sends show the request ID as a safe support reference.
+- Browser events and server request summaries are appended to `hypermania.log` beside `server.js`. To trace a reported failure, search that file for the request ID shown in the UI; matching entries also include the conversation `threadId` and, for model generations, the server `jobId`.
 
 ## Linux systemd install
 
@@ -114,6 +115,7 @@ If you edit `hypermania.env`, restart the service for changes to apply. Re-runni
 - The browser endpoint control may be changed only from the local machine; use `OLLAMA_BASE` for the durable default.
 - Ollama must be reachable by the machine and account running Hypermania. For the default setup, ensure `ollama serve` or the Ollama system service is running.
 - Image and PDF input requires a multimodal model. Text-only models are identified in the UI and will not receive attachments. PDF rendering requires Poppler (`pdfinfo` and `pdftoppm`) on the Hypermania server; PDFs are limited to 25 MB and 32 pages.
+- Error banners intentionally show a high-level reason instead of raw server or Ollama diagnostics. Detailed technical failures are recorded with correlation IDs, but prompts, file names, attachments, and model output are not deliberately logged.
 - `hypermania.log` grows over time; rotate or archive it as part of normal host maintenance.
 
 ## Development

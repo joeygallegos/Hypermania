@@ -872,10 +872,6 @@ button.secondary {
   border-bottom-left-radius: 8px;
 }
 
-.message-bubble.reasoning-bubble {
-  max-width: min(680px, 78%);
-}
-
 .message-bubble.final-answer-bubble {
   border-color: rgba(167, 139, 250, 0.42);
   background: linear-gradient(180deg, rgba(167, 139, 250, 0.2), rgba(124, 58, 237, 0.12)), rgba(7, 7, 12, 0.96);
@@ -1103,52 +1099,6 @@ button.secondary {
 .final-answer-bubble .Primer_Brand__TextCursorAnimation-module__TextCursorAnimation-cursor___1_9mQ {
   background-color: #c4b5fd;
   box-shadow: 0 0 12px rgba(196, 181, 253, 0.45);
-}
-
-.thinking-panel {
-  margin-top: 10px;
-  padding: 0;
-  border: 0;
-  background: transparent;
-}
-
-.thinking-panel summary {
-  cursor: pointer;
-  list-style: none;
-  color: var(--muted);
-  font-size: 0.85rem;
-  font-weight: 700;
-}
-
-.thinking-panel summary:hover {
-  color: var(--text);
-}
-
-.thinking-panel summary::-webkit-details-marker {
-  display: none;
-}
-
-.thinking-panel[open] summary {
-  margin-bottom: 10px;
-  color: var(--text);
-}
-
-.thinking-panel[open] {
-  padding: 10px 12px 12px;
-  border-radius: 18px;
-  border: 1px solid rgba(95, 237, 131, 0.14);
-  background: rgba(140, 242, 166, 0.015);
-}
-
-.thinking-text {
-  margin: 0;
-  white-space: pre-wrap;
-  word-break: break-word;
-  color: var(--muted);
-  line-height: 1.5;
-  max-height: 240px;
-  overflow: auto;
-  padding-right: 4px;
 }
 
 .chat {

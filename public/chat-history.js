@@ -19,6 +19,10 @@
   function isValidConversationSummary(conversation) {
     return conversation
       && typeof conversation.id === "string"
+      // threadId was added after saved-chat history shipped, so omitted values
+      // remain valid and receive a UUID when that legacy chat is next opened.
+      && (conversation.threadId === undefined
+        || /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(conversation.threadId))
       && typeof conversation.title === "string"
       && typeof conversation.createdAt === "string"
       && typeof conversation.updatedAt === "string"

@@ -1,11 +1,14 @@
 const { after, before, test } = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs");
 const http = require("node:http");
 const path = require("node:path");
+const { randomUUID } = require("node:crypto");
 const { spawn } = require("node:child_process");
 const { once } = require("node:events");
 
 const PROJECT_DIR = path.resolve(__dirname, "..");
+const LOG_FILE = path.join(PROJECT_DIR, "hypermania.log");
 let appProcess;
 let appBase;
 let mockOllama;
@@ -87,6 +90,26 @@ async function waitForChatJob(id, predicate, offset = 0, timeoutMs = 1000) {
   throw new Error(`Timed out waiting for chat job ${id}. Last state: ${JSON.stringify(job)}`);
 }
 
+async function waitForLogEntry(requestId, predicate, timeoutMs = 1000) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const text = await fs.promises.readFile(LOG_FILE, "utf8").catch(() => "");
+    const entry = text.split("\n")
+      .filter(Boolean)
+      .map((line) => {
+        try {
+          return JSON.parse(line.slice(line.indexOf("{")));
+        } catch {
+          return null;
+        }
+      })
+      .find((candidate) => candidate?.requestId === requestId && predicate(candidate));
+    if (entry) return entry;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error(`Timed out waiting for log entry ${requestId}.`);
+}
+
 before(async () => {
   // Exercise the real HTTP server in a child process while keeping tests fast,
   // deterministic, and independent of the user's installed Ollama models.
@@ -110,6 +133,9 @@ before(async () => {
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "mock generation failed" }));
         return;
+      }
+      if (lastChatRequest.messages?.at(-1)?.content === "delayed-headers") {
+        await new Promise((resolve) => setTimeout(resolve, 75));
       }
       res.writeHead(200, { "Content-Type": "application/x-ndjson" });
       if (lastChatRequest.messages?.at(-1)?.content === "incremental-recovery") {
@@ -183,6 +209,7 @@ after(async () => {
 test("serves the chat shell and its required assets", async () => {
   const index = await fetch(`${appBase}/`);
   assert.equal(index.status, 200);
+  assert.equal(index.headers.get("cache-control"), "no-cache");
   const html = await index.text();
   assert.match(html, /id="conversationList"/);
   assert.match(html, /src="\/chat-history\.js"/);
@@ -191,6 +218,7 @@ test("serves the chat shell and its required assets", async () => {
   for (const asset of ["/app.js", "/chat-history.js", "/style.css"]) {
     const response = await fetch(`${appBase}${asset}`);
     assert.equal(response.status, 200, asset);
+    assert.equal(response.headers.get("cache-control"), "no-cache", asset);
   }
 });
 
@@ -239,7 +267,7 @@ test("retains a generation while the browser is away and returns missed chunks",
   });
 
   assert.equal(start.status, 202);
-  const { id } = await start.json();
+  const { id, requestId } = await start.json();
   assert.match(id, /^[a-f0-9-]{36}$/);
 
   // No client holds a response stream during this pause. This represents a
@@ -252,12 +280,14 @@ test("retains a generation while the browser is away and returns missed chunks",
     status: "complete",
     offset: 93,
     data: '{"message":{"content":"saved"},"done":false}\n{"message":{"content":" response"},"done":true}\n',
+    requestId,
   });
   const missedTail = await fetch(`${appBase}/api/chat/jobs/${id}?offset=45`);
   assert.deepEqual(await missedTail.json(), {
     status: "complete",
     offset: 93,
     data: '{"message":{"content":" response"},"done":true}\n',
+    requestId,
   });
   const invalidOffset = await fetch(`${appBase}/api/chat/jobs/${id}?offset=94`);
   assert.equal(invalidOffset.status, 416);
@@ -326,13 +356,60 @@ test("keeps concurrent retained responses isolated by job ID", async () => {
 });
 
 test("reports a retained job failure without leaving it running", async () => {
-  const { id } = await startChatJob("job-failure");
+  const { id, requestId } = await startChatJob("job-failure");
   const job = await waitForChatJob(id, (candidate) => candidate.status !== "running");
 
   assert.equal(job.status, "failed");
   assert.equal(job.offset, 0);
   assert.equal(job.data, "");
-  assert.match(job.error, /mock generation failed/);
+  assert.equal(job.requestId, requestId);
+  assert.equal(job.error, "The model request failed. Check the server log and try again.");
+  assert.doesNotMatch(job.error, /mock generation failed/);
+});
+
+test("allows Ollama to prepare a response before sending headers", async () => {
+  const { id } = await startChatJob("delayed-headers");
+  const job = await waitForChatJob(id, (candidate) => candidate.status === "complete");
+
+  assert.match(job.data, /hello/);
+  assert.match(job.data, /world/);
+});
+
+test("correlates a failed send without exposing diagnostics or forwarding trace metadata", async () => {
+  const threadId = randomUUID();
+  const requestId = randomUUID();
+  const payload = {
+    model: "test-model:latest",
+    messages: [{ role: "user", content: "job-failure" }],
+    stream: true,
+  };
+  const response = await fetch(`${appBase}/api/chat/jobs`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Hypermania-Thread-Id": threadId,
+      "X-Hypermania-Request-Id": requestId,
+    },
+    body: JSON.stringify(payload),
+  });
+  const started = await response.json();
+  assert.equal(response.status, 202);
+  assert.equal(started.requestId, requestId);
+
+  const job = await waitForChatJob(started.id, (candidate) => candidate.status === "failed");
+  assert.equal(job.requestId, requestId);
+  assert.doesNotMatch(job.error, /mock generation failed/);
+  assert.deepEqual(lastChatRequest, payload);
+
+  const logEntry = await waitForLogEntry(
+    requestId,
+    (entry) => entry.source === "chat_job" && entry.event === "finished"
+  );
+  assert.equal(logEntry.threadId, threadId);
+  assert.equal(logEntry.jobId, started.id);
+  assert.equal(logEntry.status, "failed");
+  assert.match(logEntry.error, /mock generation failed/);
+  assert.doesNotMatch(JSON.stringify(logEntry), /messages|job-failure/);
 });
 
 test("validates retained-job methods, payloads, IDs, and offsets", async (t) => {
@@ -350,7 +427,9 @@ test("validates retained-job methods, payloads, IDs, and offsets", async (t) => 
         body,
       });
       assert.equal(response.status, 400, body);
-      assert.deepEqual(await response.json(), { error: "Invalid chat request." });
+      const result = await response.json();
+      assert.equal(result.error, "Invalid chat request.");
+      assert.match(result.requestId, /^[a-f0-9-]{36}$/);
     }
   });
 
@@ -389,13 +468,30 @@ test("reports the configured Ollama endpoint", async () => {
 });
 
 test("rejects malformed PDF uploads without invoking external tools", async () => {
+  const threadId = randomUUID();
+  const requestId = randomUUID();
   const response = await fetch(`${appBase}/api/pdf/render`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ data: "not-valid-base64!" }),
+    headers: {
+      "Content-Type": "application/json",
+      "X-Hypermania-Thread-Id": threadId,
+      "X-Hypermania-Request-Id": requestId,
+    },
+    body: JSON.stringify({ data: "not-valid-base64!", attachmentIndex: 2, attachmentCount: 3 }),
   });
   assert.equal(response.status, 400);
-  assert.match((await response.json()).error, /base64 PDF data/i);
+  const result = await response.json();
+  assert.match(result.error, /base64 PDF data/i);
+  assert.equal(result.requestId, requestId);
+
+  const logEntry = await waitForLogEntry(
+    requestId,
+    (entry) => entry.source === "pdf" && entry.event === "render_failed"
+  );
+  assert.equal(logEntry.threadId, threadId);
+  assert.equal(logEntry.attachmentIndex, 2);
+  assert.equal(logEntry.attachmentCount, 3);
+  assert.equal(logEntry.status, 400);
 });
 
 test("returns 404 for missing static files", async () => {

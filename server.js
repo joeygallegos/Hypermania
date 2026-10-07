@@ -1,10 +1,12 @@
 const http = require("http");
+const https = require("https");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
 const { randomUUID } = require("crypto");
 const { execFile } = require("child_process");
 const { promisify } = require("util");
+const { Readable } = require("stream");
 
 const PORT = Number(process.env.PORT || 3111);
 const PUBLIC_DIR = path.join(__dirname, "public");
@@ -17,6 +19,7 @@ const MAX_CHAT_JOBS = 50;
 const MAX_CHAT_JOB_CHARS = 8 * 1024 * 1024;
 const MAX_CHAT_JOB_RUNTIME_MS = 30 * 60 * 1000;
 const CHAT_JOB_RETENTION_MS = 6 * 60 * 60 * 1000;
+const TRACE_ID_PATTERN = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i;
 // The JSON request contains base64, which expands the allowed PDF before validation.
 const MAX_PDF_REQUEST_BYTES = Math.ceil((MAX_PDF_BYTES * 4) / 3) + 1024 * 1024;
 const chatJobs = new Map();
@@ -69,6 +72,138 @@ async function appendLog(entry)
   await fs.promises.appendFile(LOG_FILE, line, "utf8");
 }
 
+async function appendLogSafely(entry)
+{
+  try
+  {
+    await appendLog(entry);
+  } catch (error)
+  {
+    // Logging is best-effort so an unavailable log file cannot replace the
+    // response for the failure that operators actually need to diagnose.
+    console.error(safeStringify({
+      source: "logging",
+      event: "write_failed",
+      message: error.message || "Could not write the Hypermania log.",
+      originalEntry: entry,
+    }));
+  }
+}
+
+function getTraceContext(req)
+{
+  if (req.traceContext) return req.traceContext;
+  const threadHeader = String(req.headers["x-hypermania-thread-id"] || "");
+  const requestHeader = String(req.headers["x-hypermania-request-id"] || "");
+  // IDs are untrusted input used in logs, so accept only canonical UUIDs and
+  // create a safe request reference when a caller omits or spoofs one.
+  req.traceContext = {
+    threadId: TRACE_ID_PATTERN.test(threadHeader) ? threadHeader : undefined,
+    requestId: TRACE_ID_PATTERN.test(requestHeader) ? requestHeader : randomUUID(),
+  };
+  return req.traceContext;
+}
+
+function boundedDiagnostic(value)
+{
+  // Bound upstream diagnostics and remove control characters to keep every
+  // structured log event single-line and resistant to log injection.
+  return String(value || "Unknown failure").replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 2000);
+}
+
+function errorDiagnostic(error)
+{
+  const cause = error?.cause;
+  const errorFields = error && typeof error === "object"
+    ? [error.name, error.code, error.errno, error.syscall, error.address, error.port, error.message]
+    : [];
+  const causeFields = cause && typeof cause === "object"
+    ? [cause.name, cause.code, cause.errno, cause.syscall, cause.address, cause.port, cause.message]
+    : [];
+  // Node's fetch errors often expose only "fetch failed" at the top level;
+  // the nested cause contains the actionable timeout, socket, or address data.
+  return boundedDiagnostic([
+    ...errorFields,
+    ...causeFields,
+  ].filter((value, index, values) => value !== undefined && value !== "" && values.indexOf(value) === index).join(" | "));
+}
+
+function ollamaResponse(response)
+{
+  return {
+    ok: response.statusCode >= 200 && response.statusCode < 300,
+    status: response.statusCode,
+    headers: {
+      get(name)
+      {
+        const value = response.headers[String(name).toLowerCase()];
+        return Array.isArray(value) ? value.join(", ") : value || null;
+      },
+    },
+    body: Readable.toWeb(response),
+    async text()
+    {
+      const chunks = [];
+      let retainedBytes = 0;
+      for await (const chunk of response)
+      {
+        if (retainedBytes >= 64 * 1024) continue;
+        const remaining = 64 * 1024 - retainedBytes;
+        const retained = Buffer.from(chunk).subarray(0, remaining);
+        chunks.push(retained);
+        retainedBytes += retained.length;
+      }
+      return Buffer.concat(chunks).toString("utf8");
+    },
+  };
+}
+
+function requestOllama(targetPath, body, signal)
+{
+  const target = new URL(targetPath, ollamaBase);
+  const transport = target.protocol === "https:" ? https : http;
+  return new Promise((resolve, reject) =>
+  {
+    let activeResponse;
+    const request = transport.request(target, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": body.length,
+      },
+    });
+    const abort = () =>
+    {
+      const error = new Error("The model request was aborted.");
+      error.name = "AbortError";
+      if (activeResponse) activeResponse.destroy(error);
+      else request.destroy(error);
+    };
+
+    request.once("response", (response) =>
+    {
+      activeResponse = response;
+      response.once("close", () => signal?.removeEventListener("abort", abort));
+      resolve(ollamaResponse(response));
+    });
+    request.once("error", (error) =>
+    {
+      signal?.removeEventListener("abort", abort);
+      reject(error);
+    });
+    if (signal)
+    {
+      if (signal.aborted)
+      {
+        abort();
+        return;
+      }
+      signal.addEventListener("abort", abort, { once: true });
+    }
+    request.end(body);
+  });
+}
+
 function sendJson(res, status, payload)
 {
   const body = JSON.stringify(payload);
@@ -78,6 +213,11 @@ function sendJson(res, status, payload)
     "Access-Control-Allow-Origin": "*",
   });
   res.end(body);
+}
+
+function sendError(res, status, error, requestId)
+{
+  sendJson(res, status, { error, requestId });
 }
 
 function sendText(res, status, body, contentType = "text/plain; charset=utf-8")
@@ -122,6 +262,9 @@ function serveStatic(req, res)
     res.writeHead(200, {
       "Content-Type": types[ext] || "application/octet-stream",
       "Content-Length": data.length,
+      // Revalidate deployed assets so an ordinary reload cannot keep an old
+      // client error contract while the server is already running new code.
+      "Cache-Control": "no-cache",
     });
     res.end(data);
   });
@@ -166,6 +309,7 @@ async function readBody(req, maxBytes = Infinity)
 
 async function handleLog(req, res)
 {
+  const trace = getTraceContext(req);
   const body = await readBody(req);
   let payload = {};
   try
@@ -181,10 +325,9 @@ async function handleLog(req, res)
     };
   }
 
-  await appendLog({
-    source: "client",
-    ...payload,
-  });
+  // Apply trusted fields last so client JSON cannot spoof another request or
+  // impersonate a server-side log source.
+  await appendLogSafely({ ...payload, source: "client", ...trace });
 
   res.writeHead(204, {
     "Access-Control-Allow-Origin": "*",
@@ -236,6 +379,7 @@ async function getPdfPageCount(pdfPath)
 
 async function handlePdfRender(req, res)
 {
+  const trace = getTraceContext(req);
   if (req.method !== "POST")
   {
     sendJson(res, 405, { error: "Method not allowed" });
@@ -243,6 +387,8 @@ async function handlePdfRender(req, res)
   }
 
   let tempDir;
+  let attachmentIndex;
+  let attachmentCount;
   try
   {
     const body = await readBody(req, MAX_PDF_REQUEST_BYTES);
@@ -254,6 +400,12 @@ async function handlePdfRender(req, res)
     {
       throw new PdfInputError("Invalid PDF upload request.");
     }
+    attachmentIndex = Number.isInteger(payload.attachmentIndex) && payload.attachmentIndex > 0
+      ? payload.attachmentIndex
+      : undefined;
+    attachmentCount = Number.isInteger(payload.attachmentCount) && payload.attachmentCount > 0
+      ? payload.attachmentCount
+      : undefined;
     const pdf = getPdfPayload(payload);
     tempDir = await fs.promises.mkdtemp(path.join(os.tmpdir(), "hypermania-pdf-"));
     const inputPath = path.join(tempDir, "source.pdf");
@@ -300,15 +452,35 @@ async function handlePdfRender(req, res)
       images.push(image.toString("base64"));
     }
 
-    await appendLog({ source: "pdf", event: "rendered", pages: pageCount, inputBytes: pdf.length, outputBytes: totalBytes });
+    await appendLogSafely({
+      source: "pdf",
+      event: "rendered",
+      ...trace,
+      attachmentIndex,
+      attachmentCount,
+      pages: pageCount,
+      inputBytes: pdf.length,
+      outputBytes: totalBytes,
+    });
     sendJson(res, 200, { images, pageCount });
   } catch (error)
   {
     const expected = error instanceof PdfInputError || error.statusCode === 413;
-    await appendLog({ source: "pdf", event: "render_failed", status: expected ? error.statusCode || 400 : 500, message: error.message });
-    sendJson(res, expected ? error.statusCode || 400 : 500, {
-      error: expected ? error.message : "PDF rendering failed. Check the server log and try again.",
+    await appendLogSafely({
+      source: "pdf",
+      event: "render_failed",
+      ...trace,
+      attachmentIndex,
+      attachmentCount,
+      status: expected ? error.statusCode || 400 : 500,
+      message: boundedDiagnostic(error.message),
     });
+    sendError(
+      res,
+      expected ? error.statusCode || 400 : 500,
+      expected ? error.message : "PDF rendering failed. Check the server log and try again.",
+      trace.requestId
+    );
   } finally
   {
     if (tempDir)
@@ -320,22 +492,38 @@ async function handlePdfRender(req, res)
 
 async function proxy(req, res, targetPath)
 {
+  const trace = getTraceContext(req);
   const body = await readBody(req);
-  await appendLog({
+  await appendLogSafely({
     source: "proxy",
     event: "request_start",
+    ...trace,
     targetPath,
     method: req.method,
     bytes: body.length,
   });
 
-  const response = await fetch(`${ollamaBase}${targetPath}`, {
-    method: "POST",
-    headers: {
-      "Content-Type": req.headers["content-type"] || "application/json",
-    },
-    body,
-  });
+  const response = await requestOllama(targetPath, body);
+
+  if (!response.ok)
+  {
+    const details = await response.text();
+    await appendLogSafely({
+      source: "proxy",
+      event: "request_failed",
+      ...trace,
+      targetPath,
+      status: response.status,
+      message: boundedDiagnostic(details || `Ollama returned HTTP ${response.status}.`),
+    });
+    sendError(
+      res,
+      response.status,
+      targetPath === "/api/chat" ? "The model request failed." : "The Ollama request failed.",
+      trace.requestId
+    );
+    return;
+  }
 
   res.writeHead(response.status, {
     "Content-Type": response.headers.get("content-type") || "application/json; charset=utf-8",
@@ -346,9 +534,10 @@ async function proxy(req, res, targetPath)
 
   if (!response.body)
   {
-    await appendLog({
+    await appendLogSafely({
       source: "proxy",
       event: "response_empty_body",
+      ...trace,
       targetPath,
       status: response.status,
     });
@@ -371,9 +560,10 @@ async function proxy(req, res, targetPath)
   {
     reader.releaseLock();
     res.end();
-    await appendLog({
+    await appendLogSafely({
       source: "proxy",
       event: "request_end",
+      ...trace,
       targetPath,
       status: response.status,
       bytes: total,
@@ -429,12 +619,7 @@ async function runChatJob(job, body)
   const timeout = setTimeout(() => controller.abort(), MAX_CHAT_JOB_RUNTIME_MS);
   try
   {
-    const response = await fetch(`${ollamaBase}/api/chat`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body,
-      signal: controller.signal,
-    });
+    const response = await requestOllama("/api/chat", body, controller.signal);
 
     if (!response.ok)
     {
@@ -461,26 +646,30 @@ async function runChatJob(job, body)
     job.status = "failed";
     job.error = error.name === "AbortError"
       ? "The model request exceeded the 30-minute response limit."
-      : error.message || "The model request failed.";
+      : "The model request failed. Check the server log and try again.";
+    job.errorDetails = errorDiagnostic(error);
     if (reader) await reader.cancel().catch(() => { });
   } finally
   {
     clearTimeout(timeout);
     if (reader) reader.releaseLock();
     job.updatedAt = Date.now();
-    await appendLog({
+    await appendLogSafely({
       source: "chat_job",
       event: "finished",
+      threadId: job.threadId,
+      requestId: job.requestId,
       jobId: job.id,
       status: job.status,
       chars: job.data.length,
-      error: job.error || undefined,
-    }).catch(() => { });
+      error: job.errorDetails || undefined,
+    });
   }
 }
 
 async function handleChatJobs(req, res)
 {
+  const trace = getTraceContext(req);
   const requestUrl = new URL(req.url, "http://localhost");
   pruneChatJobs(req.method === "POST" && requestUrl.pathname === "/api/chat/jobs");
 
@@ -493,7 +682,8 @@ async function handleChatJobs(req, res)
     }
     if (chatJobs.size >= MAX_CHAT_JOBS)
     {
-      sendJson(res, 503, { error: "Too many responses are being retained. Try again later." });
+      await appendLogSafely({ source: "chat_job", event: "rejected", ...trace, status: 503, reason: "capacity" });
+      sendError(res, 503, "Too many responses are being retained. Try again later.", trace.requestId);
       return;
     }
 
@@ -504,25 +694,29 @@ async function handleChatJobs(req, res)
       payload = JSON.parse(body.toString("utf8"));
     } catch
     {
-      sendJson(res, 400, { error: "Invalid chat request." });
+      await appendLogSafely({ source: "chat_job", event: "rejected", ...trace, status: 400, reason: "invalid_json" });
+      sendError(res, 400, "Invalid chat request.", trace.requestId);
       return;
     }
     if (!payload || typeof payload !== "object" || Array.isArray(payload))
     {
-      sendJson(res, 400, { error: "Invalid chat request." });
+      await appendLogSafely({ source: "chat_job", event: "rejected", ...trace, status: 400, reason: "invalid_payload" });
+      sendError(res, 400, "Invalid chat request.", trace.requestId);
       return;
     }
 
     payload.stream = true;
     const job = {
       id: randomUUID(),
+      ...trace,
       status: "running",
       data: "",
       error: "",
       updatedAt: Date.now(),
     };
     chatJobs.set(job.id, job);
-    sendJson(res, 202, { id: job.id });
+    await appendLogSafely({ source: "chat_job", event: "started", ...trace, jobId: job.id });
+    sendJson(res, 202, { id: job.id, requestId: trace.requestId });
     runChatJob(job, Buffer.from(JSON.stringify(payload))).catch(() => { });
     return;
   }
@@ -557,6 +751,7 @@ async function handleChatJobs(req, res)
     status: job.status,
     offset: job.data.length,
     data: job.data.slice(offset),
+    requestId: job.requestId,
     ...(job.error ? { error: job.error } : {}),
   });
 }
@@ -601,7 +796,7 @@ async function handleOllamaConfig(req, res)
   try
   {
     ollamaBase = normalizeOllamaBase(payload?.ollamaBase);
-    await appendLog({ source: "config", event: "ollama_base_changed", ollamaBase });
+    await appendLogSafely({ source: "config", event: "ollama_base_changed", ollamaBase });
     sendJson(res, 200, { ollamaBase });
   } catch (error)
   {
@@ -616,7 +811,7 @@ const server = http.createServer(async (req, res) =>
     res.writeHead(204, {
       "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type",
+      "Access-Control-Allow-Headers": "Content-Type, X-Hypermania-Thread-Id, X-Hypermania-Request-Id",
     });
     res.end();
     return;
@@ -671,9 +866,16 @@ const server = http.createServer(async (req, res) =>
     serveStatic(req, res);
   } catch (error)
   {
-    sendJson(res, 500, {
-      error: error.message || "Unexpected server error",
+    const trace = getTraceContext(req);
+    await appendLogSafely({
+      source: "server",
+      event: "request_failed",
+      ...trace,
+      method: req.method,
+      path: req.url.split("?")[0],
+      message: errorDiagnostic(error),
     });
+    sendError(res, 500, "Unexpected server error. Check the server log and try again.", trace.requestId);
   }
 });
 

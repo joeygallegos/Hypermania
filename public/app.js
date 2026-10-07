@@ -1,5 +1,6 @@
 const state = {
-  requestSeq: 0,
+  threadId: makeConversationId(),
+  activeRequestId: null,
   history: [],
   conversations: [],
   activeConversation: null,
@@ -12,8 +13,6 @@ const state = {
   contextSize: Number.parseInt(window.hypermaniaPreferences.getContextSize(), 10) || 8192,
   thinkMode: window.hypermaniaPreferences.getThinkMode(),
   assistantPre: null,
-  assistantReasoningPre: null,
-  assistantReasoningDetails: null,
   assistantPendingBubble: null,
   assistantWait: null,
   assistantWaitLabel: null,
@@ -49,7 +48,7 @@ function debugLog(event, details = {}) {
 
   fetch("/api/log", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: traceHeaders(),
     body: JSON.stringify(payload),
     keepalive: true,
   }).catch(() => {});
@@ -108,7 +107,25 @@ function openChatDatabase() {
 
 function makeConversationId() {
   if (typeof crypto.randomUUID === "function") return crypto.randomUUID();
-  return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+  // Retain UUID-shaped correlation on older browsers without adding a runtime
+  // dependency; cryptographic uniqueness is not a security boundary here.
+  return "xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx".replace(/[xy]/g, (character) => {
+    const random = Math.floor(Math.random() * 16);
+    const value = character === "x" ? random : (random & 0x3) | 0x8;
+    return value.toString(16);
+  });
+}
+
+function isTraceId(value) {
+  return /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-9]{3}-[a-f0-9]{12}$/i.test(value || "");
+}
+
+function traceHeaders() {
+  return {
+    "Content-Type": "application/json",
+    "X-Hypermania-Thread-Id": state.threadId,
+    ...(state.activeRequestId ? { "X-Hypermania-Request-Id": state.activeRequestId } : {}),
+  };
 }
 
 function formatConversationDate(value) {
@@ -192,6 +209,7 @@ function startNewConversation({ focus = true, confirmDraft = true } = {}) {
   if (confirmDraft && !confirmDraftDiscard("start a new chat")) return;
   state.history = [];
   state.activeConversation = null;
+  state.threadId = makeConversationId();
   state.preferredConversationModel = "";
   el("messages").replaceChildren();
   resetDraft();
@@ -223,16 +241,11 @@ function renderStoredConversation(conversation) {
       assistant.pending.remove();
       assistant.answerNode.classList.remove("is-pending");
       const thinking = cleanThinkingText(message.thinking || "");
-      if (thinking) {
-        assistant.reasoningPre.textContent = thinking;
-      } else {
-        assistant.reasoningRow.remove();
-      }
       if (message.content) {
         renderMarkdown(assistant.answerPre, message.content);
       } else {
         setAssistantAnswerText(assistant.answerPre, thinking
-          ? "(Reasoning only; open the collapsed thoughts below.)"
+          ? "(The model completed its reasoning but returned no final answer.)"
           : "(Model returned no visible answer.)");
       }
     }
@@ -282,6 +295,11 @@ async function selectConversation(id, { focus = true, confirmDraft = true } = {}
     }
 
     state.activeConversation = conversation;
+    // Older browser history may use a non-UUID key. Keep that storage key while
+    // assigning a valid correlation ID when the conversation is next opened.
+    state.threadId = isTraceId(conversation.threadId)
+      ? conversation.threadId
+      : isTraceId(conversation.id) ? conversation.id : makeConversationId();
     state.history = record.history;
     resetDraft();
     clearError();
@@ -300,7 +318,8 @@ async function persistCurrentConversation() {
   const database = await openChatDatabase();
   const now = new Date().toISOString();
   const conversation = state.activeConversation || {
-    id: makeConversationId(),
+    id: state.threadId,
+    threadId: state.threadId,
     title: conversationTitle(state.history),
     createdAt: now,
     updatedAt: now,
@@ -327,6 +346,7 @@ async function persistCurrentConversation() {
 
   const summary = {
     ...conversation,
+    threadId: state.threadId,
     updatedAt: now,
     model: el("model").value,
     revision: (storedSummary?.revision || 0) + 1,
@@ -467,6 +487,11 @@ function setBusy(isBusy, statusText = "") {
   status.classList.toggle("loading", isBusy);
   if (statusText) {
     status.textContent = statusText;
+    // Keep the visible in-message progress label aligned with the live region
+    // instead of maintaining a second, independently updated status.
+    if (state.assistantWaitLabel) {
+      state.assistantWaitLabel.textContent = statusText.replace(/\.{3}/g, "…");
+    }
   }
 
   const send = el("send");
@@ -729,42 +754,20 @@ function createMessage(role, content, meta = "") {
   return { row, node, pre };
 }
 
-function createAssistantMessage(meta = "", context = "this request") {
-  const reasoningRow = document.createElement("div");
-  reasoningRow.className = "message-row assistant";
-
-  const reasoningNode = document.createElement("article");
-  reasoningNode.className = "message-bubble assistant reasoning-bubble";
-
-  if (meta) {
-    reasoningNode.dataset.meta = meta;
-  }
-
+function createAssistantMessage(meta = "") {
   const pending = document.createElement("div");
   pending.className = "wait-indicator";
+  // The hidden status live region announces progress to assistive technology;
+  // this mirrored label is visual only so the same update is not read twice.
+  pending.setAttribute("aria-hidden", "true");
   const pendingLabel = document.createElement("span");
-  pendingLabel.textContent = "Thinking…";
+  pendingLabel.textContent = el("status").textContent.replace(/\.{3}/g, "…") || "Waiting…";
   pending.appendChild(pendingLabel);
   const cursor = document.createElement("span");
   cursor.className = "text-cursor Primer_Brand__TextCursorAnimation-module__TextCursorAnimation-cursor___1_9mQ";
   cursor.setAttribute("aria-hidden", "true");
   cursor.setAttribute("data-testid", "TextCursorAnimation-cursor");
   pending.appendChild(cursor);
-
-  const reasoningDetails = document.createElement("details");
-  reasoningDetails.className = "thinking-panel";
-
-  const summary = document.createElement("summary");
-  summary.textContent = `Reasoning for: ${context}`;
-
-  const reasoningPre = document.createElement("pre");
-  reasoningPre.className = "thinking-text";
-  reasoningPre.textContent = "";
-
-  reasoningDetails.appendChild(summary);
-  reasoningDetails.appendChild(reasoningPre);
-  reasoningNode.appendChild(reasoningDetails);
-  reasoningRow.appendChild(reasoningNode);
 
   const answerRow = document.createElement("div");
   answerRow.className = "message-row assistant";
@@ -780,15 +783,10 @@ function createAssistantMessage(meta = "", context = "this request") {
   answerNode.appendChild(answerPre);
   answerRow.appendChild(answerNode);
 
-  el("messages").appendChild(reasoningRow);
   el("messages").appendChild(answerRow);
   scrollMessagesToBottom();
 
   return {
-    reasoningRow,
-    reasoningNode,
-    reasoningPre,
-    reasoningDetails,
     answerRow,
     answerNode,
     answerPre,
@@ -903,18 +901,6 @@ function getThinkPayload(modelName, info) {
   return undefined;
 }
 
-function summarizeThinkingContext(prompt, imageCount) {
-  const pieces = [];
-  const trimmed = prompt.replace(/\s+/g, " ").trim();
-  if (trimmed) {
-    pieces.push(trimmed.length > 88 ? `${trimmed.slice(0, 85)}…` : trimmed);
-  }
-  if (imageCount) {
-    pieces.push(`${imageCount} image${imageCount === 1 ? "" : "s"}`);
-  }
-  return pieces.length ? pieces.join(" · ") : "this request";
-}
-
 function cleanThinkingText(text) {
   if (!text) return "";
   return String(text)
@@ -976,7 +962,7 @@ function beginGenerationMonitor() {
     const idleSeconds = Math.max(1, Math.round(idleMs / 1000));
 
     if (idleMs >= 8000) {
-      setBusy(true, `Still thinking… (${idleSeconds}s since last update)`);
+      setBusy(true, `Still working… (${idleSeconds}s since last update)`);
       debugLog("generation_idle", {
         requestId: state.activeRequestId,
         idleSeconds,
@@ -1198,15 +1184,21 @@ function isPdf(file) {
   return file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
 }
 
-async function renderPdf(file) {
+async function renderPdf(file, attachmentIndex, attachmentCount) {
   const dataUrl = await fileToDataUrl(file);
   const response = await fetch("/api/pdf/render", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ data: dataUrl }),
+    headers: traceHeaders(),
+    body: JSON.stringify({ data: dataUrl, attachmentIndex, attachmentCount }),
   });
   const result = await response.json().catch(() => ({}));
-  if (!response.ok) throw new Error(result.error || `PDF rendering failed (HTTP ${response.status}).`);
+  if (!response.ok) {
+    throw publicError(
+      result.error || "The PDF could not be prepared.",
+      `PDF rendering failed (HTTP ${response.status}).`,
+      result.requestId
+    );
+  }
   if (!Array.isArray(result.images) || !result.images.length) throw new Error("PDF rendering returned no pages.");
 
   return result.images.map((base64, index) => ({
@@ -1275,6 +1267,32 @@ function extractErrorDetails(raw) {
   return typeof current === "string" ? current : "Unexpected Ollama error";
 }
 
+function publicError(publicMessage, diagnostic = publicMessage, referenceId = "") {
+  const error = new Error(diagnostic);
+  error.publicMessage = publicMessage;
+  error.referenceId = referenceId;
+  return error;
+}
+
+function apiResponseError(raw, fallback, status) {
+  let payload = {};
+  try {
+    payload = JSON.parse(raw);
+  } catch {
+    // Raw HTML and proxy text are diagnostic data, not safe UI copy.
+  }
+  return publicError(
+    typeof payload.error === "string" ? payload.error : fallback,
+    extractErrorDetails(raw) || `HTTP ${status}`,
+    typeof payload.requestId === "string" ? payload.requestId : ""
+  );
+}
+
+function errorReference(error) {
+  const referenceId = error.referenceId || state.activeRequestId;
+  return referenceId ? ` Reference ID: ${referenceId}.` : "";
+}
+
 function imageSupportHint(modelName) {
   const supported = [...state.modelInfo.entries()]
     .filter(([name, info]) => supportsVision(info, name))
@@ -1291,13 +1309,13 @@ async function streamChat(model, messages, thinkValue) {
   const requestBody = buildRequestBody(model, messages, thinkValue, true);
   const startResponse = await fetch("/api/chat/jobs", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: traceHeaders(),
     body: JSON.stringify(requestBody),
   });
 
   if (!startResponse.ok) {
     const body = await startResponse.text();
-    throw new Error(extractErrorDetails(body) || `HTTP ${startResponse.status}`);
+    throw apiResponseError(body, "The model request could not be started.", startResponse.status);
   }
   const { id: jobId } = await startResponse.json();
   if (!jobId) throw new Error("Hypermania did not return a response ID.");
@@ -1331,19 +1349,10 @@ async function streamChat(model, messages, thinkValue) {
         }
         if (chunk) {
           if (chunk.error) {
-            throw new Error(extractErrorDetails(chunk.error));
+            throw publicError("The model request failed.", extractErrorDetails(chunk.error));
           }
           if (chunk.message?.thinking) {
-            if (state.assistantWaitLabel) {
-              state.assistantWaitLabel.textContent = "Thinking…";
-            }
             thinkingFull += chunk.message.thinking;
-            if (state.assistantReasoningPre) {
-              state.assistantReasoningPre.textContent = thinkingFull;
-            }
-            if (state.assistantReasoningDetails) {
-              state.assistantReasoningDetails.open = false;
-            }
             touchGeneration("thinking");
             if (!sawFirstChunk) {
               debugLog("stream_thinking_seen", {
@@ -1389,10 +1398,9 @@ async function streamChat(model, messages, thinkValue) {
           chunk = null;
         }
 
-        if (chunk?.error) throw new Error(extractErrorDetails(chunk.error));
+        if (chunk?.error) throw publicError("The model request failed.", extractErrorDetails(chunk.error));
         if (chunk?.message?.thinking) {
           thinkingFull += chunk.message.thinking;
-          if (state.assistantReasoningPre) state.assistantReasoningPre.textContent = thinkingFull;
           touchGeneration("thinking");
         }
         if (chunk?.message?.content) {
@@ -1432,11 +1440,12 @@ async function streamChat(model, messages, thinkValue) {
       // this fetch, retrying the same offset safely requests only missed text.
       const response = await fetch(`/api/chat/jobs/${encodeURIComponent(jobId)}?offset=${offset}`, {
         cache: "no-store",
+        headers: traceHeaders(),
         signal: controller.signal,
       });
       if (!response.ok) {
         const body = await response.text();
-        const responseError = new Error(extractErrorDetails(body) || `HTTP ${response.status}`);
+        const responseError = apiResponseError(body, "The response could not be retrieved.", response.status);
         responseError.retryable = response.status >= 500;
         throw responseError;
       }
@@ -1456,7 +1465,6 @@ async function streamChat(model, messages, thinkValue) {
       if (retryExpired) {
         throw new Error("Could not reconnect to the in-progress response.");
       }
-      if (state.assistantWaitLabel) state.assistantWaitLabel.textContent = "Reconnecting…";
       setBusy(true, document.hidden ? "Response continues in the background…" : "Reconnecting to response…");
       await waitForNextPoll();
       continue;
@@ -1476,7 +1484,11 @@ async function streamChat(model, messages, thinkValue) {
       scrollMessagesToBottom();
     }
     if (update.status === "failed") {
-      throw new Error(extractErrorDetails(update.error || "The model request failed."));
+      throw publicError(
+        update.error || "The model request failed.",
+        update.error || "The model request failed.",
+        update.requestId
+      );
     }
     if (update.status === "complete") break;
     await waitForNextPoll();
@@ -1495,7 +1507,7 @@ async function streamChat(model, messages, thinkValue) {
     if (full) {
       setAssistantAnswerText(state.assistantPre, full);
     } else if (cleanedThinking) {
-      setAssistantAnswerText(state.assistantPre, "(Reasoning only; see the collapsed thoughts below.)");
+      setAssistantAnswerText(state.assistantPre, "(The model completed its reasoning but returned no final answer.)");
     } else {
       setAssistantAnswerText(state.assistantPre, "(Model returned no visible answer.)");
     }
@@ -1510,13 +1522,13 @@ async function fetchChatOnce(model, messages, thinkValue) {
 
   const res = await fetch("/api/chat", {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: traceHeaders(),
     body: JSON.stringify(requestBody),
   });
 
   if (!res.ok) {
     const body = await res.text();
-    throw new Error(extractErrorDetails(body) || `HTTP ${res.status}`);
+    throw apiResponseError(body, "The model request failed.", res.status);
   }
 
   const data = await res.json();
@@ -1557,7 +1569,9 @@ async function sendChat() {
   const userContent = prompt || "Describe the attached image or PDF.";
   const directAttachments = state.images.map((img) => img.base64);
   const attachmentLabel = attachmentSummary(state.images, pendingPdfs);
-  const requestId = ++state.requestSeq;
+  // One request ID follows the complete send across every PDF render, model
+  // request, retry, and client/server log entry triggered by this action.
+  const requestId = makeConversationId();
   state.activeRequestId = requestId;
   state.requestInProgress = true;
   let submittedUserMessage = null;
@@ -1571,10 +1585,8 @@ async function sendChat() {
   let assistant = null;
 
   try {
-    assistant = createAssistantMessage(`model: ${model}`, summarizeThinkingContext(prompt, hasAttachments ? 1 : 0));
+    assistant = createAssistantMessage(`model: ${model}`);
     state.assistantPre = assistant.answerPre;
-    state.assistantReasoningPre = assistant.reasoningPre;
-    state.assistantReasoningDetails = assistant.reasoningDetails;
     state.assistantPendingBubble = assistant.answerNode;
     state.assistantWait = assistant.pending;
     state.assistantWaitLabel = assistant.pendingLabel;
@@ -1583,9 +1595,8 @@ async function sendChat() {
     const renderedAttachments = [];
     if (pendingPdfs.length) {
       setBusy(true, "Preparing PDF pages...");
-      state.assistantWaitLabel.textContent = "Preparing PDF pages…";
-      for (const pdf of pendingPdfs) {
-        renderedAttachments.push(...await renderPdf(pdf.file));
+      for (const [index, pdf] of pendingPdfs.entries()) {
+        renderedAttachments.push(...await renderPdf(pdf.file, index + 1, pendingPdfs.length));
       }
     }
     const attachments = [...directAttachments, ...renderedAttachments.map((image) => image.base64)];
@@ -1611,11 +1622,9 @@ async function sendChat() {
         requestId,
         thinkingChars: thinking.length,
       });
-      if (state.assistantWaitLabel) {
-        state.assistantWaitLabel.textContent = thinking
-          ? "Polishing final answer…"
-          : "Retrying without streaming…";
-      }
+      setBusy(true, thinking
+        ? "Polishing final answer…"
+        : "Retrying without streaming…");
       if (cleanThinkingText(thinking)) {
         const polished = await polishFinalAnswer(model, state.history, thinking, userContent);
         reply = polished.content || reply;
@@ -1628,15 +1637,11 @@ async function sendChat() {
     }
     state.history.push({ role: "assistant", content: reply, thinking });
 
-    if (state.assistantReasoningPre) {
-      state.assistantReasoningPre.textContent = cleanThinkingText(thinking) || "";
-    }
-
     if (reply) {
       renderMarkdown(state.assistantPre, reply);
     } else {
       setAssistantAnswerText(state.assistantPre, cleanThinkingText(thinking)
-        ? "(Reasoning only; open the collapsed thoughts below.)"
+        ? "(The model completed its reasoning but returned no final answer.)"
         : "(Model returned no visible answer.)");
     }
 
@@ -1663,32 +1668,30 @@ async function sendChat() {
     if (submittedUserMessage && !el("prompt").value) {
       el("prompt").value = prompt;
     }
-    const message = extractErrorDetails(error.message || String(error));
-    const hint = message.toLowerCase().includes("multimodal")
+    const diagnostic = extractErrorDetails(error.message || String(error));
+    const publicMessage = error.publicMessage
+      || (diagnostic.toLowerCase().includes("multimodal")
+        ? diagnostic
+        : "An internal or connection error interrupted the request.");
+    const hint = publicMessage.toLowerCase().includes("multimodal")
       ? imageSupportHint(model)
-      : `${message} Your message and attachments are ready to send again.`;
+      : `${publicMessage} Your message and attachments are ready to send again.${errorReference(error)}`;
 
     // The request UI is provisional until a complete answer is saved. Removing
     // it avoids leaving a stale Thinking indicator or duplicating the failure in
     // both an assistant bubble and the error banner.
     renderedUserMessage.row.remove();
-    assistant?.reasoningRow.remove();
     assistant?.answerRow.remove();
     showError("The response could not be completed.", hint);
     debugLog("send_error", {
       requestId,
-      message,
+      message: diagnostic,
     });
     endGenerationMonitor("Request failed. Your message is ready to retry.");
   } finally {
     state.requestInProgress = false;
     endGenerationMonitor(el("status").textContent || "Done.");
-    if (state.assistantReasoningDetails) {
-      state.assistantReasoningDetails.open = false;
-    }
     state.assistantPre = null;
-    state.assistantReasoningPre = null;
-    state.assistantReasoningDetails = null;
     state.assistantPendingBubble = null;
     state.assistantWait = null;
     state.assistantWaitLabel = null;

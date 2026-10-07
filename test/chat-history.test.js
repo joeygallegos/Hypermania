@@ -54,4 +54,9 @@ test("isValidConversationSummary requires resumable versioned metadata", () => {
   assert.equal(isValidConversationSummary({ ...summary, revision: 0 }), false);
   assert.equal(isValidConversationSummary({ ...summary, model: null }), false);
   assert.equal(isValidConversationSummary({ ...summary, id: undefined }), false);
+  assert.equal(isValidConversationSummary({
+    ...summary,
+    threadId: "d9428888-122b-4f09-9914-f307aa6c5ac2",
+  }), true);
+  assert.equal(isValidConversationSummary({ ...summary, threadId: "not-a-trace-id" }), false);
 });
