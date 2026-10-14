@@ -6,6 +6,7 @@
   "scripts": {
     "build:styles": "sass public/style.scss public/style.css --style=expanded",
     "test": "node --test",
+    "test:surface": "node --test logging-config.test.js surface-contract.test.js",
     "watch:styles": "sass --watch public/style.scss:public/style.css",
     "start": "npm run build:styles && node server.js"
   },

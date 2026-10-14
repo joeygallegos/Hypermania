@@ -194,10 +194,15 @@ function resetDraft() {
   renderPreview();
   setDropLabel();
   setAttachmentTrayOpen(false);
+  updateSendState();
 }
 
 function hasDraft() {
   return Boolean(el("prompt").value.trim() || state.images.length || state.pdfs.length);
+}
+
+function updateSendState() {
+  el("send").disabled = state.requestInProgress || !hasDraft();
 }
 
 function confirmDraftDiscard(action) {
@@ -251,7 +256,9 @@ function renderStoredConversation(conversation) {
     }
     scrollMessagesToBottom();
   } finally {
-    messages.setAttribute("aria-live", "polite");
+    // Streaming token updates are intentionally excluded from live-region
+    // announcements. The concise status region communicates request phases.
+    messages.setAttribute("aria-live", "off");
   }
   setStatus(`Opened ${conversation.title}.`);
 }
@@ -479,13 +486,14 @@ function buildRequestBody(model, messages, thinkValue, stream) {
 }
 
 function setStatus(text) {
-  el("status").textContent = text;
+  const status = el("status");
+  if (status.textContent !== text) status.textContent = text;
 }
 
 function setBusy(isBusy, statusText = "") {
   const status = el("status");
   status.classList.toggle("loading", isBusy);
-  if (statusText) {
+  if (statusText && status.textContent !== statusText) {
     status.textContent = statusText;
     // Keep the visible in-message progress label aligned with the live region
     // instead of maintaining a second, independently updated status.
@@ -495,12 +503,13 @@ function setBusy(isBusy, statusText = "") {
   }
 
   const send = el("send");
-  send.disabled = isBusy;
+  updateSendState();
   send.textContent = isBusy ? "Waiting..." : state.sendLabel;
 
   const attachmentToggle = el("attachmentToggle");
   const dropzone = el("dropzone");
   el("model").disabled = isBusy;
+  el("prompt").disabled = isBusy;
   attachmentToggle.disabled = isBusy;
   dropzone.classList.toggle("disabled", isBusy);
   dropzone.setAttribute("aria-disabled", String(isBusy));
@@ -510,6 +519,55 @@ function setBusy(isBusy, statusText = "") {
   el("conversationList").querySelectorAll("button").forEach((button) => {
     button.disabled = isBusy;
   });
+  el("preview").querySelectorAll(".attachment-remove").forEach((button) => {
+    button.disabled = isBusy;
+  });
+}
+
+function ensureErrorControls() {
+  const box = el("errorBox");
+  let reference = box.querySelector(".error-reference");
+  let actions = box.querySelector(".error-actions");
+  if (reference && actions) return { reference, actions };
+
+  reference = document.createElement("p");
+  reference.className = "error-reference";
+  reference.hidden = true;
+
+  actions = document.createElement("div");
+  actions.className = "error-actions";
+  actions.hidden = true;
+
+  const retry = document.createElement("button");
+  retry.type = "button";
+  retry.className = "secondary error-retry";
+  retry.textContent = "Retry request";
+  retry.addEventListener("click", () => {
+    // The failed provisional history entry was removed before this control was
+    // shown, so one click resubmits the preserved draft exactly once.
+    if (state.requestInProgress) return;
+    retry.disabled = true;
+    sendChat();
+  });
+
+  const copy = document.createElement("button");
+  copy.type = "button";
+  copy.className = "secondary error-copy-reference";
+  copy.textContent = "Copy reference";
+  copy.addEventListener("click", async () => {
+    const referenceId = reference.dataset.referenceId || "";
+    if (!referenceId) return;
+    try {
+      await navigator.clipboard.writeText(referenceId);
+      copy.textContent = "Reference copied";
+    } catch {
+      copy.textContent = "Select reference to copy";
+    }
+  });
+
+  actions.append(retry, copy);
+  box.append(reference, actions);
+  return { reference, actions };
 }
 
 function clearError() {
@@ -517,12 +575,34 @@ function clearError() {
   box.hidden = true;
   el("errorMessage").textContent = "";
   el("errorHint").textContent = "";
+  const { reference, actions } = ensureErrorControls();
+  reference.hidden = true;
+  reference.textContent = "";
+  reference.removeAttribute("data-reference-id");
+  actions.hidden = true;
+  actions.querySelector(".error-retry").disabled = false;
+  actions.querySelector(".error-copy-reference").textContent = "Copy reference";
 }
 
-function showError(message, hint = "") {
+function showError(message, hint = "", { referenceId = "", retry = false } = {}) {
+  const box = el("errorBox");
+  const controls = ensureErrorControls();
   el("errorMessage").textContent = message;
   el("errorHint").textContent = hint;
-  el("errorBox").hidden = false;
+  controls.reference.hidden = !referenceId;
+  controls.reference.dataset.referenceId = referenceId;
+  // Only the opaque correlation ID reaches the UI; detailed diagnostics stay
+  // in the server log where filenames, model output, and internals are safer.
+  controls.reference.textContent = referenceId
+    ? `Reference ID: ${referenceId} · Use this reference when checking hypermania.log.`
+    : "";
+  controls.actions.hidden = !retry && !referenceId;
+  controls.actions.querySelector(".error-retry").hidden = !retry;
+  controls.actions.querySelector(".error-retry").disabled = false;
+  controls.actions.querySelector(".error-copy-reference").hidden = !referenceId;
+  controls.actions.querySelector(".error-copy-reference").textContent = "Copy reference";
+  box.hidden = false;
+  box.focus();
 }
 
 function scrollMessagesToBottom() {
@@ -801,19 +881,63 @@ function addMessage(role, content, meta = "") {
 
 function renderPreview() {
   const preview = el("preview");
-  preview.innerHTML = "";
+  preview.replaceChildren();
 
-  if (!state.images.length) {
+  if (!state.images.length && !state.pdfs.length) {
     preview.classList.remove("has-items");
     return;
   }
 
   preview.classList.add("has-items");
-  state.images.forEach((image) => {
+  const renderItem = (attachment, kind, index) => {
     const figure = document.createElement("figure");
-    figure.innerHTML = `<img src="${image.dataUrl}" alt="${image.name}"><figcaption>${image.name}</figcaption>`;
+    figure.className = `attachment-item attachment-${kind.toLowerCase()}`;
+    figure.setAttribute("role", "listitem");
+
+    if (kind === "Image") {
+      const image = document.createElement("img");
+      image.src = attachment.dataUrl;
+      image.alt = "";
+      figure.appendChild(image);
+    } else {
+      const badge = document.createElement("div");
+      badge.className = "attachment-pdf-badge";
+      badge.textContent = "PDF";
+      badge.setAttribute("aria-hidden", "true");
+      figure.appendChild(badge);
+    }
+
+    const caption = document.createElement("figcaption");
+    const kindLabel = document.createElement("span");
+    kindLabel.className = "attachment-kind";
+    kindLabel.textContent = kind;
+    const name = document.createElement("span");
+    name.className = "attachment-name";
+    // Filenames are untrusted input, so inventory text is never interpolated
+    // into HTML even though local previews may contain user-selected content.
+    name.textContent = attachment.name;
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "secondary attachment-remove";
+    remove.textContent = "Remove";
+    remove.setAttribute("aria-label", `Remove ${attachment.name}`);
+    remove.disabled = state.requestInProgress;
+    remove.addEventListener("click", () => {
+      if (state.requestInProgress) return;
+      const collection = kind === "Image" ? state.images : state.pdfs;
+      collection.splice(index, 1);
+      renderPreview();
+      setDropLabel();
+      updateSendState();
+      renderModelMeta();
+    });
+    caption.append(kindLabel, name, remove);
+    figure.appendChild(caption);
     preview.appendChild(figure);
-  });
+  };
+
+  state.images.forEach((image, index) => renderItem(image, "Image", index));
+  state.pdfs.forEach((pdf, index) => renderItem(pdf, "PDF", index));
 }
 
 function attachmentSummary(images = state.images, pdfs = state.pdfs) {
@@ -834,6 +958,7 @@ function setDropLabel() {
   el("attachmentToggle").textContent = summary
     ? `+ ${summary} attached`
     : "+ Add images or PDF";
+  updateSendState();
 }
 
 function setAttachmentTrayOpen(open) {
@@ -993,10 +1118,8 @@ function beginGenerationMonitor() {
 
 function touchGeneration(phase) {
   state.generationLastChunkAt = Date.now();
-  if (phase === "thinking") {
-    setBusy(true, "Thinking…");
-  } else if (phase === "answer") {
-    setBusy(true, "Streaming answer…");
+  if (phase === "thinking" || phase === "answer") {
+    setBusy(true, "Receiving response…");
   }
 }
 
@@ -1208,7 +1331,7 @@ async function renderPdf(file, attachmentIndex, attachmentCount) {
   }));
 }
 
-async function ingestFiles(fileList, { append = false, pasted = false } = {}) {
+async function ingestFiles(fileList, { append = true, pasted = false } = {}) {
   const files = Array.from(fileList).filter((file) => file.type.startsWith("image/") || isPdf(file));
   if (!files.length) return;
 
@@ -1288,11 +1411,6 @@ function apiResponseError(raw, fallback, status) {
   );
 }
 
-function errorReference(error) {
-  const referenceId = error.referenceId || state.activeRequestId;
-  return referenceId ? ` Reference ID: ${referenceId}.` : "";
-}
-
 function imageSupportHint(modelName) {
   const supported = [...state.modelInfo.entries()]
     .filter(([name, info]) => supportsVision(info, name))
@@ -1307,6 +1425,7 @@ function imageSupportHint(modelName) {
 
 async function streamChat(model, messages, thinkValue) {
   const requestBody = buildRequestBody(model, messages, thinkValue, true);
+  setBusy(true, "Waiting for model…");
   const startResponse = await fetch("/api/chat/jobs", {
     method: "POST",
     headers: traceHeaders(),
@@ -1574,14 +1693,14 @@ async function sendChat() {
   const requestId = makeConversationId();
   state.activeRequestId = requestId;
   state.requestInProgress = true;
-  let submittedUserMessage = null;
+  const historyStartIndex = state.history.length;
 
   const renderedUserMessage = addMessage(
     "user",
     hasAttachments ? `${userContent}\n\n[${attachmentLabel} attached]` : userContent
   );
 
-  setBusy(true, pendingPdfs.length ? "Preparing PDF pages..." : "Waiting for Ollama...");
+  setBusy(true, pendingPdfs.length ? `Preparing PDF 1 of ${pendingPdfs.length}…` : "Waiting for model…");
   let assistant = null;
 
   try {
@@ -1594,8 +1713,8 @@ async function sendChat() {
 
     const renderedAttachments = [];
     if (pendingPdfs.length) {
-      setBusy(true, "Preparing PDF pages...");
       for (const [index, pdf] of pendingPdfs.entries()) {
+        setBusy(true, `Preparing PDF ${index + 1} of ${pendingPdfs.length}…`);
         renderedAttachments.push(...await renderPdf(pdf.file, index + 1, pendingPdfs.length));
       }
     }
@@ -1609,12 +1728,14 @@ async function sendChat() {
       promptChars: userContent.length,
       imageCount: attachments.length,
     });
-    submittedUserMessage = { role: "user", content: userContent, images: attachments };
-    state.history.push(submittedUserMessage);
-    el("prompt").value = "";
+    state.history.push({ role: "user", content: userContent, images: attachments });
+
+    // Keep the visible draft and raw File objects untouched until persistence
+    // succeeds. A failed attempt can then be retried without reconstructing or
+    // duplicating prompt text and attachments.
 
     beginGenerationMonitor();
-    setBusy(true, "Waiting for Ollama...");
+    setBusy(true, "Waiting for model…");
 
     let { content: reply, thinking } = await streamChat(model, state.history, thinkValue);
     if (!reply) {
@@ -1655,6 +1776,7 @@ async function sendChat() {
     });
     endGenerationMonitor("Done.");
     el("images").value = "";
+    el("prompt").value = "";
     state.images = [];
     state.pdfs = [];
     renderPreview();
@@ -1662,12 +1784,10 @@ async function sendChat() {
     setAttachmentTrayOpen(false);
     renderModelMeta();
   } catch (error) {
-    if (state.history[state.history.length - 1] === submittedUserMessage) {
-      state.history.pop();
-    }
-    if (submittedUserMessage && !el("prompt").value) {
-      el("prompt").value = prompt;
-    }
+    // A persistence failure happens after both provisional messages have been
+    // added. Restore the exact pre-send history so retry never duplicates a
+    // user or assistant entry, regardless of which request phase failed.
+    state.history.splice(historyStartIndex);
     const diagnostic = extractErrorDetails(error.message || String(error));
     const publicMessage = error.publicMessage
       || (diagnostic.toLowerCase().includes("multimodal")
@@ -1675,14 +1795,18 @@ async function sendChat() {
         : "An internal or connection error interrupted the request.");
     const hint = publicMessage.toLowerCase().includes("multimodal")
       ? imageSupportHint(model)
-      : `${publicMessage} Your message and attachments are ready to send again.${errorReference(error)}`;
+      : `${publicMessage} Your message and attachments are ready to send again.`;
+    const referenceId = error.referenceId || requestId;
 
     // The request UI is provisional until a complete answer is saved. Removing
     // it avoids leaving a stale Thinking indicator or duplicating the failure in
     // both an assistant bubble and the error banner.
     renderedUserMessage.row.remove();
     assistant?.answerRow.remove();
-    showError("The response could not be completed.", hint);
+    showError("The response could not be completed.", hint, {
+      referenceId,
+      retry: true,
+    });
     debugLog("send_error", {
       requestId,
       message: diagnostic,
@@ -1783,6 +1907,8 @@ el("prompt").addEventListener("keydown", (event) => {
   sendChat();
 });
 
+el("prompt").addEventListener("input", updateSendState);
+
 el("prompt").addEventListener("paste", (event) => {
   const clipboard = event.clipboardData;
   const imageFiles = Array.from(clipboard?.files || []).filter((file) => file.type.startsWith("image/"));
@@ -1809,13 +1935,20 @@ el("prompt").addEventListener("paste", (event) => {
   const start = target.selectionStart ?? target.value.length;
   const end = target.selectionEnd ?? target.value.length;
   target.setRangeText(normalized, start, end, "end");
+  updateSendState();
 });
 
 attachFileHandling();
-el("errorBox").hidden = true;
+el("messages").setAttribute("aria-live", "off");
+el("preview").setAttribute("role", "list");
+el("preview").setAttribute("aria-label", "Attachments ready to send");
+el("errorBox").setAttribute("role", "alert");
+el("errorBox").setAttribute("aria-atomic", "true");
+el("errorBox").setAttribute("tabindex", "-1");
 clearError();
 setDropLabel();
 state.sendLabel = el("send").textContent;
+updateSendState();
 const savedContextSize = window.hypermaniaPreferences.getContextSize();
 const contextSelect = el("contextSize");
 contextSelect.value = [...contextSelect.options].some((option) => option.value === savedContextSize) ? savedContextSize : "8192";

@@ -38,6 +38,7 @@ Hypermania reads these environment variables at startup:
 | --- | --- | --- |
 | `PORT` | `3111` | Port for the Hypermania web server. |
 | `OLLAMA_BASE` | `http://127.0.0.1:11434` | Base URL of the Ollama server. |
+| `HYPERMANIA_LOG_FILE` | `<project>/hypermania.log` | Absolute path for the diagnostic log. Use a separate path for test or service instances. |
 
 macOS and Linux:
 
@@ -63,11 +64,11 @@ You can also change the active endpoint from the **Settings** page using a hostn
 - **Context length** is passed to Ollama as `options.num_ctx`. Larger contexts consume more memory or VRAM.
 - Markdown is rendered after a response completes. During streaming, content stays plain text so the layout does not jump.
 - Chat generation runs on the Hypermania server, so a mobile browser can suspend the tab and catch up on missed response chunks when it returns. Recoverable results are held in server memory for up to six hours; restarting Hypermania clears them.
-- The **Add images** tray supports selecting files and drag-and-drop. Paste clipboard images into the message box to attach them, too.
+- The attachment tray supports selecting, appending, reviewing, and individually removing images or PDFs. Paste clipboard images into the message box to attach them, too.
 - Press **Enter** to send a message; use **Shift+Enter** for a new line.
 - Completed conversations are saved in the browser with IndexedDB. Chat history is specific to the current browser profile and exact Hypermania address, so changing devices, browser profiles, hostnames, or ports shows a different history.
 - Use **New chat** to start a blank conversation. Select a saved chat to review or continue it, or use its **Delete** button to permanently remove it from this browser's Hypermania storage.
-- Each conversation has a stable thread ID. Each send has a separate request ID that follows its PDF rendering, model generation, retries, and log entries. Failed sends show the request ID as a safe support reference.
+- Each conversation has a stable thread ID. Each send has a separate request ID that follows its PDF rendering, model generation, and log entries. Failed sends preserve the draft and attachments, offer a retry, and show the request ID as a safe support reference.
 - Browser events and server request summaries are appended to `hypermania.log` beside `server.js`. To trace a reported failure, search that file for the request ID shown in the UI; matching entries also include the conversation `threadId` and, for model generations, the server `jobId`.
 
 ## Linux systemd install
@@ -139,6 +140,14 @@ npm test
 ```
 
 The suite validates saved-chat data contracts and starts an isolated Hypermania server with a mock Ollama endpoint to test static assets, proxy streaming, context forwarding, configuration, and common error responses.
+
+Run the faster dependency-free surface and diagnostic contract checks with:
+
+```bash
+npm run test:surface
+```
+
+These checks protect the intended mobile hierarchy, attachment and recovery controls, progress labels, accessibility attributes, and isolated logging configuration. They do not replace a real-browser layout test.
 
 ## Project layout
 

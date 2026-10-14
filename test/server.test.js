@@ -2,13 +2,15 @@ const { after, before, test } = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const http = require("node:http");
+const os = require("node:os");
 const path = require("node:path");
 const { randomUUID } = require("node:crypto");
 const { spawn } = require("node:child_process");
 const { once } = require("node:events");
 
 const PROJECT_DIR = path.resolve(__dirname, "..");
-const LOG_FILE = path.join(PROJECT_DIR, "hypermania.log");
+let testDirectory;
+let logFile;
 let appProcess;
 let appBase;
 let mockOllama;
@@ -93,7 +95,7 @@ async function waitForChatJob(id, predicate, offset = 0, timeoutMs = 1000) {
 async function waitForLogEntry(requestId, predicate, timeoutMs = 1000) {
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
-    const text = await fs.promises.readFile(LOG_FILE, "utf8").catch(() => "");
+    const text = await fs.promises.readFile(logFile, "utf8").catch(() => "");
     const entry = text.split("\n")
       .filter(Boolean)
       .map((line) => {
@@ -111,6 +113,11 @@ async function waitForLogEntry(requestId, predicate, timeoutMs = 1000) {
 }
 
 before(async () => {
+  // Every suite run gets a private log so parallel or interrupted tests cannot
+  // consume stale diagnostics or append to the operator's production log.
+  testDirectory = await fs.promises.mkdtemp(path.join(os.tmpdir(), "hypermania-test-"));
+  logFile = path.join(testDirectory, "hypermania.log");
+
   // Exercise the real HTTP server in a child process while keeping tests fast,
   // deterministic, and independent of the user's installed Ollama models.
   mockOllama = http.createServer(async (req, res) => {
@@ -182,6 +189,7 @@ before(async () => {
     cwd: PROJECT_DIR,
     env: {
       ...process.env,
+      HYPERMANIA_LOG_FILE: logFile,
       OLLAMA_BASE: mockOllamaBase,
       PORT: String(appPort),
     },
@@ -190,6 +198,7 @@ before(async () => {
   appProcess.stdout.on("data", (chunk) => { appOutput += chunk; });
   appProcess.stderr.on("data", (chunk) => { appOutput += chunk; });
   await waitForApp(`${appBase}/`);
+  assert.ok(appOutput.includes(`Writing debug log to ${logFile}`));
 }, { timeout: 15000 });
 
 after(async () => {
@@ -203,6 +212,9 @@ after(async () => {
   }
   if (mockOllama?.listening) {
     await new Promise((resolve, reject) => mockOllama.close((error) => error ? reject(error) : resolve()));
+  }
+  if (testDirectory) {
+    await fs.promises.rm(testDirectory, { recursive: true, force: true });
   }
 });
 

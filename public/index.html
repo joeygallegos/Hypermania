@@ -35,12 +35,13 @@
         <ol id="conversationList" class="conversation-list" aria-label="Saved chats"></ol>
       </aside>
 
-      <section class="panel chat">
+      <section class="panel chat" aria-labelledby="activeChatTitle">
         <div class="chat-head">
           <div class="active-chat-heading">
             <p class="section-kicker">Conversation</p>
             <h2 id="activeChatTitle">New chat</h2>
           </div>
+          <a class="secondary nav-link mobile-history-link" href="#chatHistoryTitle">Chats</a>
           <div id="modelMeta" class="model-meta" aria-live="polite"></div>
         </div>
         <select id="thinkMode" hidden aria-hidden="true"></select>

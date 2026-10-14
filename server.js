@@ -10,7 +10,22 @@ const { Readable } = require("stream");
 
 const PORT = Number(process.env.PORT || 3111);
 const PUBLIC_DIR = path.join(__dirname, "public");
-const LOG_FILE = path.join(__dirname, "hypermania.log");
+const DEFAULT_LOG_FILE = path.join(__dirname, "hypermania.log");
+
+function configuredLogFile(value)
+{
+  if (value === undefined) return DEFAULT_LOG_FILE;
+
+  // Requiring an absolute path keeps service and test logs independent of the
+  // process working directory, which can vary across launchers and test runs.
+  if (!value || !path.isAbsolute(value) || value.includes("\0"))
+  {
+    throw new Error("HYPERMANIA_LOG_FILE must be an absolute file path.");
+  }
+  return path.normalize(value);
+}
+
+const LOG_FILE = configuredLogFile(process.env.HYPERMANIA_LOG_FILE);
 const execFileAsync = promisify(execFile);
 const MAX_PDF_BYTES = 25 * 1024 * 1024;
 const MAX_PDF_PAGES = 32;

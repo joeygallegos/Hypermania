@@ -707,6 +707,21 @@ button.secondary {
   line-height: 1.5;
 }
 
+.error-reference {
+  margin: 0;
+  color: var(--muted);
+  font-size: 0.84rem;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+  user-select: all;
+}
+
+.error-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
 .dropzone {
   border: 1.5px dashed rgba(95, 237, 131, 0.28);
   background:
@@ -763,6 +778,19 @@ button.secondary {
   background: rgba(140, 242, 166, 0.02);
 }
 
+.attachment-pdf-badge {
+  height: 130px;
+  display: grid;
+  place-items: center;
+  color: var(--text);
+  background:
+    linear-gradient(145deg, rgba(167, 139, 250, 0.22), rgba(124, 58, 237, 0.08)),
+    rgba(4, 6, 4, 0.92);
+  font-size: 1.05rem;
+  font-weight: 850;
+  letter-spacing: 0.12em;
+}
+
 .preview img {
   display: block;
   width: 100%;
@@ -771,14 +799,48 @@ button.secondary {
 }
 
 .preview figcaption {
-  padding: 8px 10px 10px;
+  min-width: 0;
+  padding: 9px 10px 10px;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 3px 8px;
   font-size: 0.84rem;
   color: var(--muted);
+}
+
+.attachment-kind {
+  color: var(--muted-2);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+// Keep long local filenames from widening the card while the removal control
+// remains a stable target beside both lines of attachment identity.
+.attachment-name {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-remove {
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  padding: 8px 10px;
+  font-size: 0.78rem;
 }
 
 .chat-head {
   margin-bottom: 16px;
   flex: 0 0 auto;
+}
+
+.mobile-history-link {
+  display: none;
 }
 
 .active-chat-heading {
@@ -1176,6 +1238,23 @@ button.secondary {
   .shell {
     height: auto;
     min-height: 100vh;
+    min-height: 100svh;
+    width: min(1440px, calc(100vw - 20px));
+    padding: 10px 0 20px;
+    gap: 10px;
+  }
+
+  .hero,
+  .panel {
+    border-radius: 18px;
+  }
+
+  .hero {
+    padding: 14px;
+  }
+
+  .panel {
+    padding: 16px;
   }
 
   .hero {
@@ -1224,10 +1303,36 @@ button.secondary {
 
   .chat-workspace {
     grid-template-columns: 1fr;
+    gap: 10px;
+  }
+
+  // Put the primary task first and size it to the remaining small-screen
+  // viewport so both the conversation and composer stay available together.
+  // Chat history follows in normal page flow instead of consuming the opening
+  // viewport or adding a second scrolling region.
+  .chat {
+    order: -1;
+    height: calc(100svh - 153px);
+    min-height: 480px;
   }
 
   .chat-history {
-    max-height: 270px;
+    max-height: none;
+    gap: 10px;
+    overflow: visible;
+  }
+
+  .history-head {
+    padding-bottom: 10px;
+  }
+
+  .history-empty {
+    margin: 0;
+    padding: 12px 8px;
+  }
+
+  .conversation-list {
+    overflow-y: visible;
   }
 
   .workspace.settings-collapsed {
@@ -1269,12 +1374,38 @@ button.secondary {
     max-width: none;
   }
 
+  .chat-head {
+    position: relative;
+  }
+
+  .mobile-history-link {
+    position: absolute;
+    top: 0;
+    right: 0;
+    display: inline-flex;
+  }
+
+  .active-chat-heading {
+    padding-right: 88px;
+  }
+
   .active-chat-heading h2 {
     max-width: 100%;
   }
 
   .attachment-tray {
     padding: 12px;
+  }
+
+  .error-actions button {
+    flex: 1 1 150px;
+  }
+
+  button,
+  .nav-link.secondary,
+  .conversation-open,
+  .conversation-delete {
+    min-height: 44px;
   }
 
   .status {
@@ -1285,9 +1416,6 @@ button.secondary {
     max-height: none;
   }
 
-  .chat {
-    min-height: 70vh;
-  }
 }
 
 // Keep the logo and controls from competing for the same row on narrow tablets.
@@ -1300,9 +1428,14 @@ button.secondary {
   }
 
   .chat-hero .hero-actions {
-    display: flex;
-    flex-direction: column;
-    align-items: stretch;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) auto;
+    align-items: end;
+  }
+
+  .chat-hero .model-picker,
+  .chat-hero .nav-link {
+    grid-column: auto;
   }
 
   .hero .model-picker {
