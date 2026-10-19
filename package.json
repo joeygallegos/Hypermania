@@ -12,5 +12,8 @@
   },
   "devDependencies": {
     "sass": "^1.77.8"
+  },
+  "dependencies": {
+    "katex": "0.18.4"
   }
 }

@@ -441,10 +441,7 @@ h1 {
 
 .conversation-item {
   min-width: 0;
-  display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: stretch;
-  gap: 6px;
+  position: relative;
 }
 
 .conversation-open,
@@ -456,8 +453,9 @@ h1 {
 }
 
 .conversation-open {
+  width: 100%;
   min-width: 0;
-  padding: 11px 12px;
+  padding: 11px 60px 11px 12px;
   display: grid;
   gap: 4px;
   text-align: left;
@@ -487,10 +485,29 @@ h1 {
 }
 
 .conversation-delete {
-  align-self: center;
-  padding: 9px 8px;
+  position: absolute;
+  z-index: 1;
+  inset-block: 0;
+  right: 8px;
+  width: 44px;
+  height: 44px;
+  margin-block: auto;
+  padding: 0;
+  display: grid;
+  place-items: center;
+  border-color: transparent;
+  background: transparent;
   color: #ffb4ab;
-  font-size: 0.75rem;
+}
+
+.conversation-delete svg {
+  width: 18px;
+  height: 18px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 
 .conversation-delete:hover {
@@ -936,19 +953,12 @@ button.secondary {
   overflow: hidden;
 }
 
-.message-bubble::before {
-  content: attr(data-meta);
-  display: block;
+.message-meta {
   margin-bottom: 8px;
   font-size: 0.72rem;
   letter-spacing: 0.08em;
   text-transform: uppercase;
   color: var(--muted-2);
-}
-
-.message-bubble:not([data-meta])::before,
-.message-bubble[data-meta=""]::before {
-  display: none;
 }
 
 .message-bubble.user {
@@ -1470,4 +1480,11 @@ button.secondary {
     box-shadow: 0 0 0 7px rgba(35, 234, 87, 0);
     opacity: 1;
   }
+}
+
+.final-answer-text .katex-display {
+  max-width: 100%;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding-block: 0.2rem;
 }

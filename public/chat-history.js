@@ -8,12 +8,40 @@
     root.hypermaniaChatHistory = helpers;
   }
 }(typeof globalThis === "object" ? globalThis : this, () => {
+  const HISTORY_MESSAGE_KEYS = new Set(["role", "content", "images", "thinking", "model"]);
+
   function isValidHistoryMessage(message) {
     // Saved data is untrusted input: browser extensions, older app versions, or
     // manual storage edits must not inject unexpected values into Ollama requests.
     if (!message || !["user", "assistant"].includes(message.role) || typeof message.content !== "string") return false;
+    if (Object.keys(message).some((key) => !HISTORY_MESSAGE_KEYS.has(key))) return false;
     if (message.images !== undefined && (!Array.isArray(message.images) || message.images.some((image) => typeof image !== "string"))) return false;
-    return message.thinking === undefined || typeof message.thinking === "string";
+    if (message.images !== undefined && message.role !== "user") return false;
+    if (message.thinking !== undefined && (message.role !== "assistant" || typeof message.thinking !== "string")) return false;
+    return message.model === undefined
+      || (message.role === "assistant" && typeof message.model === "string" && Boolean(message.model.trim()));
+  }
+
+  function toOllamaMessages(messages, systemInstruction = "") {
+    // Model attribution is local presentation metadata. Rebuild every outbound
+    // message so it and any unexpected stored fields never cross into Ollama.
+    const outboundMessages = messages.map((message) => {
+      const outbound = { role: message.role, content: message.content };
+      if (message.images !== undefined) outbound.images = [...message.images];
+      if (message.thinking !== undefined) outbound.thinking = message.thinking;
+      return outbound;
+    });
+
+    // Keep the browser-level instruction out of persisted conversation history
+    // so changing it affects future requests without rewriting saved chats.
+    const instruction = String(systemInstruction).trim();
+    return instruction
+      ? [{ role: "system", content: instruction }, ...outboundMessages]
+      : outboundMessages;
+  }
+
+  function historyHasImages(messages) {
+    return messages.some((message) => Array.isArray(message.images) && message.images.length > 0);
   }
 
   function isValidConversationSummary(conversation) {
@@ -39,7 +67,9 @@
 
   return {
     conversationTitle,
+    historyHasImages,
     isValidConversationSummary,
     isValidHistoryMessage,
+    toOllamaMessages,
   };
 }));

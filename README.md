@@ -28,7 +28,7 @@ npm start
 
 Then open [http://localhost:3111](http://localhost:3111). By default, Hypermania connects to Ollama at `http://127.0.0.1:11434`.
 
-> The app has no production npm dependencies. Sass is installed as a development dependency to compile the stylesheet before startup.
+> KaTeX is the sole production npm dependency and is served locally for math rendering. Sass is installed as a development dependency to compile the stylesheet before startup.
 
 ## Configuration
 
@@ -58,16 +58,19 @@ You can also change the active endpoint from the **Settings** page using a hostn
 
 ## Using Hypermania
 
-- Hypermania reads installed models and capabilities directly from Ollama. Choose the active model from the chat header; use **Settings** for endpoint, thinking, context length, and model refresh.
+- Hypermania reads installed models and capabilities directly from Ollama. Choose the active model from the chat header; use **Settings** for endpoint, thinking, context length, system instruction, and model refresh.
+- Changing the model in an existing chat affects the next response and keeps earlier messages as context. New responses record which model generated them; older saved responses created before this metadata was added display **Model not recorded**.
 - Image uploads are blocked if the selected model does not support vision.
+- A chat containing images can only be continued with a vision-capable model because earlier image messages remain part of its context.
 - **Thinking** is sent only when the selected model supports it; individual models may still ignore a chosen mode.
 - **Context length** is passed to Ollama as `options.num_ctx`. Larger contexts consume more memory or VRAM.
-- Markdown is rendered after a response completes. During streaming, content stays plain text so the layout does not jump.
+- **System instruction** is stored in the current browser and sent before every conversation. It defaults to requesting English unless the user asks for another language; edit it in **Settings**, or save it blank to disable it.
+- Markdown and TeX math are rendered after a response completes. During streaming, content stays plain text so the layout does not jump. Inline math may use `$...$` or `\(...\)`; display math may use `$$...$$` or `\[...\]`. Code spans and fenced code blocks remain literal.
 - Chat generation runs on the Hypermania server, so a mobile browser can suspend the tab and catch up on missed response chunks when it returns. Recoverable results are held in server memory for up to six hours; restarting Hypermania clears them.
 - The attachment tray supports selecting, appending, reviewing, and individually removing images or PDFs. Paste clipboard images into the message box to attach them, too.
 - Press **Enter** to send a message; use **Shift+Enter** for a new line.
 - Completed conversations are saved in the browser with IndexedDB. Chat history is specific to the current browser profile and exact Hypermania address, so changing devices, browser profiles, hostnames, or ports shows a different history.
-- Use **New chat** to start a blank conversation. Select a saved chat to review or continue it, or use its **Delete** button to permanently remove it from this browser's Hypermania storage.
+- Use **New chat** to start a blank conversation. Select a saved chat to review or continue it, or use its trash-can control to permanently remove it from this browser's Hypermania storage.
 - Each conversation has a stable thread ID. Each send has a separate request ID that follows its PDF rendering, model generation, and log entries. Failed sends preserve the draft and attachments, offer a retry, and show the request ID as a safe support reference.
 - Browser events and server request summaries are appended to `hypermania.log` beside `server.js`. To trace a reported failure, search that file for the request ID shown in the UI; matching entries also include the conversation `threadId` and, for model generations, the server `jobId`.
 
@@ -133,13 +136,13 @@ For live stylesheet compilation during development:
 npm run watch:styles
 ```
 
-Run the dependency-free core regression suite with:
+Run the core regression suite with:
 
 ```bash
 npm test
 ```
 
-The suite validates saved-chat data contracts and starts an isolated Hypermania server with a mock Ollama endpoint to test static assets, proxy streaming, context forwarding, configuration, and common error responses.
+The suite validates saved-chat and math-rendering contracts and starts an isolated Hypermania server with a mock Ollama endpoint to test static assets, proxy streaming, context forwarding, configuration, and common error responses.
 
 Run the faster dependency-free surface and diagnostic contract checks with:
 

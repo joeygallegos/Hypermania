@@ -27,8 +27,10 @@ const state = {
 const el = (id) => document.getElementById(id);
 const {
   conversationTitle,
+  historyHasImages,
   isValidConversationSummary,
   isValidHistoryMessage,
+  toOllamaMessages,
 } = window.hypermaniaChatHistory;
 const CHAT_DB_NAME = "hypermania-chats";
 const CHAT_DB_VERSION = 1;
@@ -167,9 +169,20 @@ function renderConversationList() {
     const deleteButton = document.createElement("button");
     deleteButton.type = "button";
     deleteButton.className = "conversation-delete";
-    deleteButton.textContent = "Delete";
     deleteButton.disabled = state.requestInProgress;
     deleteButton.setAttribute("aria-label", `Delete ${conversation.title}`);
+    deleteButton.title = `Delete ${conversation.title}`;
+
+    // Keep the destructive action visually compact without nesting one button
+    // inside another; the sibling controls remain independently focusable.
+    const deleteIcon = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    deleteIcon.setAttribute("viewBox", "0 0 20 20");
+    deleteIcon.setAttribute("aria-hidden", "true");
+    deleteIcon.setAttribute("focusable", "false");
+    const deletePath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    deletePath.setAttribute("d", "M3 5h14M8 5V3h4v2m3 0-1 12H6L5 5m3 4v5m4-5v5");
+    deleteIcon.appendChild(deletePath);
+    deleteButton.appendChild(deleteIcon);
     deleteButton.addEventListener("click", () => deleteConversation(conversation));
 
     item.append(openButton, deleteButton);
@@ -220,6 +233,7 @@ function startNewConversation({ focus = true, confirmDraft = true } = {}) {
   resetDraft();
   clearError();
   updateActiveChatHeading();
+  renderModelMeta();
   renderConversationList();
   if (focus) el("prompt").focus();
 }
@@ -242,7 +256,10 @@ function renderStoredConversation(conversation) {
         continue;
       }
 
-      const assistant = createAssistantMessage(`model: ${conversation.model}`, "saved response");
+      // Schema-v1 chats created before per-response attribution cannot reliably
+      // identify mixed-model turns, so do not mislabel them with the latest model.
+      const responseModel = message.model ? `Model: ${message.model}` : "Model not recorded";
+      const assistant = createAssistantMessage(responseModel, "saved response");
       assistant.pending.remove();
       assistant.answerNode.classList.remove("is-pending");
       const thinking = cleanThinkingText(message.thinking || "");
@@ -465,7 +482,10 @@ function getContextLength() {
 function buildRequestBody(model, messages, thinkValue, stream) {
   const body = {
     model,
-    messages,
+    messages: toOllamaMessages(
+      messages,
+      window.hypermaniaPreferences.getSystemInstruction()
+    ),
     stream,
   };
 
@@ -619,8 +639,8 @@ function isSafeLink(url) {
   }
 }
 
-function appendInlineMarkdown(target, source) {
-  const tokenPattern = /(`[^`]*`|\*\*[^*]+\*\*|__[^_]+__|~~[^~]+~~|\*[^*]+\*|_[^_]+_|\[[^\]]+\]\([^\s)]+\)|https?:\/\/[^\s<]+)/g;
+function appendInlineMarkdownTokens(target, source, mathTokens) {
+  const tokenPattern = /(\uE000\d+\uE001|`[^`]*`|\*\*[^*]+\*\*|__[^_]+__|~~[^~]+~~|\*[^*]+\*|_[^_]+_|\[[^\]]+\]\([^\s)]+\)|https?:\/\/[^\s<]+)/g;
   let cursor = 0;
 
   for (const match of source.matchAll(tokenPattern)) {
@@ -628,18 +648,21 @@ function appendInlineMarkdown(target, source) {
     const token = match[0];
     let node;
 
-    if (token.startsWith("`")) {
+    if (/^\uE000\d+\uE001$/.test(token)) {
+      const math = mathTokens[Number(token.slice(1, -1))];
+      node = document.createTextNode(math?.raw || token);
+    } else if (token.startsWith("`")) {
       node = document.createElement("code");
       node.textContent = token.slice(1, -1);
     } else if (token.startsWith("**") || token.startsWith("__")) {
       node = document.createElement("strong");
-      appendInlineMarkdown(node, token.slice(2, -2));
+      appendInlineMarkdownTokens(node, token.slice(2, -2), mathTokens);
     } else if (token.startsWith("~~")) {
       node = document.createElement("s");
-      appendInlineMarkdown(node, token.slice(2, -2));
+      appendInlineMarkdownTokens(node, token.slice(2, -2), mathTokens);
     } else if (token.startsWith("*") || token.startsWith("_")) {
       node = document.createElement("em");
-      appendInlineMarkdown(node, token.slice(1, -1));
+      appendInlineMarkdownTokens(node, token.slice(1, -1), mathTokens);
     } else if (token.startsWith("[")) {
       const linkMatch = token.match(/^\[([^\]]+)\]\(([^\s)]+)\)$/);
       if (linkMatch && isSafeLink(linkMatch[2])) {
@@ -647,7 +670,7 @@ function appendInlineMarkdown(target, source) {
         node.href = linkMatch[2];
         node.target = "_blank";
         node.rel = "noreferrer noopener";
-        node.textContent = linkMatch[1];
+        appendInlineMarkdownTokens(node, linkMatch[1], mathTokens);
       }
     } else if (isSafeLink(token)) {
       node = document.createElement("a");
@@ -662,6 +685,26 @@ function appendInlineMarkdown(target, source) {
   }
 
   target.append(document.createTextNode(source.slice(cursor)));
+}
+
+function appendInlineMarkdown(target, source) {
+  const segments = window.hypermaniaMath.splitMathSegments(source);
+  const mathTokens = segments.filter((segment) => segment.type === "math");
+  if (!mathTokens.length) {
+    appendInlineMarkdownTokens(target, source, mathTokens);
+    return;
+  }
+
+  let mathIndex = 0;
+  // Private-use placeholders keep Markdown emphasis from splitting TeX such as
+  // x_i + y_j. They become ordinary text nodes before the KaTeX DOM pass.
+  const protectedSource = segments.map((segment) => {
+    if (segment.type === "text") return segment.value;
+    const placeholder = `\uE000${mathIndex}\uE001`;
+    mathIndex += 1;
+    return placeholder;
+  }).join("");
+  appendInlineMarkdownTokens(target, protectedSource, mathTokens);
 }
 
 function appendMarkdownParagraph(container, lines) {
@@ -805,6 +848,9 @@ function renderMarkdown(target, source) {
     paragraphLines.push(line);
   }
   flushParagraph();
+  // Markdown establishes code boundaries first; the math pass can then skip
+  // code/pre elements while typesetting formulas in ordinary answer text.
+  window.hypermaniaMath.renderMathInElement(target);
 }
 
 function setAssistantAnswerText(target, content) {
@@ -820,7 +866,10 @@ function createMessage(role, content, meta = "") {
   node.className = `message-bubble ${role}`;
 
   if (meta) {
-    node.dataset.meta = meta;
+    const metaNode = document.createElement("div");
+    metaNode.className = "message-meta";
+    metaNode.textContent = meta;
+    node.appendChild(metaNode);
   }
 
   const pre = document.createElement("pre");
@@ -854,6 +903,13 @@ function createAssistantMessage(meta = "") {
 
   const answerNode = document.createElement("article");
   answerNode.className = "message-bubble assistant final-answer-bubble is-pending";
+
+  if (meta) {
+    const metaNode = document.createElement("div");
+    metaNode.className = "message-meta";
+    metaNode.textContent = meta;
+    answerNode.appendChild(metaNode);
+  }
 
   const answerPre = document.createElement("div");
   answerPre.className = "final-answer-text";
@@ -1174,10 +1230,28 @@ function renderModelMeta() {
 
   container.appendChild(summary);
 
-  if ((state.images.length || state.pdfs.length) && !supportsVision(info, modelName)) {
+  const hasHistoricalImages = historyHasImages(state.history);
+  const hasPendingAttachments = state.images.length || state.pdfs.length;
+  // Never imply that switching models discarded earlier images. The user must
+  // choose a compatible model or explicitly start a context-free conversation.
+  if ((hasHistoricalImages || hasPendingAttachments) && !supportsVision(info, modelName)) {
     const note = document.createElement("div");
     note.className = "model-meta-note warn";
-    note.textContent = "Attachments added, but this model cannot use image input.";
+    note.textContent = hasHistoricalImages
+      ? `This chat contains images. ${modelName} can't continue it. Choose a vision model or start a new chat.`
+      : "Attachments added, but this model cannot use image input.";
+    container.appendChild(note);
+    return;
+  }
+
+  const previousAssistant = [...state.history].reverse().find((message) => message.role === "assistant");
+  const previousModel = previousAssistant?.model || state.activeConversation?.model;
+  // A selection is only a pending handoff. Keep this note visible until the
+  // next successful response records the newly selected model in history.
+  if (state.history.length && previousModel && previousModel !== modelName) {
+    const note = document.createElement("div");
+    note.className = "model-meta-note";
+    note.textContent = `Next response: ${modelName}. Previous messages in this chat will be included as context.`;
     container.appendChild(note);
   }
 }
@@ -1450,6 +1524,9 @@ async function streamChat(model, messages, thinkValue) {
   let full = "";
   let thinkingFull = "";
   let sawFirstChunk = false;
+  // Reasoning can arrive one token per chunk; record the phase transition once
+  // instead of producing a diagnostic log entry for every token.
+  let reportedThinkingStart = false;
   let offset = 0;
   let visibleDisconnectedAt = 0;
 
@@ -1473,7 +1550,8 @@ async function streamChat(model, messages, thinkValue) {
           if (chunk.message?.thinking) {
             thinkingFull += chunk.message.thinking;
             touchGeneration("thinking");
-            if (!sawFirstChunk) {
+            if (!reportedThinkingStart) {
+              reportedThinkingStart = true;
               debugLog("stream_thinking_seen", {
                 requestId: state.activeRequestId,
                 chars: thinkingFull.length,
@@ -1521,6 +1599,13 @@ async function streamChat(model, messages, thinkValue) {
         if (chunk?.message?.thinking) {
           thinkingFull += chunk.message.thinking;
           touchGeneration("thinking");
+          if (!reportedThinkingStart) {
+            reportedThinkingStart = true;
+            debugLog("stream_thinking_seen", {
+              requestId: state.activeRequestId,
+              chars: thinkingFull.length,
+            });
+          }
         }
         if (chunk?.message?.content) {
           if (!sawFirstChunk && state.assistantWait) {
@@ -1666,22 +1751,37 @@ async function sendChat() {
   if (state.requestInProgress) return;
   clearError();
 
-  const prompt = el("prompt").value.trim();
+  // Preserve the exact draft for recovery while continuing to send the
+  // whitespace-normalized prompt used by the existing request contract.
+  const draftText = el("prompt").value;
+  const prompt = draftText.trim();
   const model = el("model").value;
   const info = state.modelInfo.get(model);
   const hasImages = state.images.length > 0;
   const pendingPdfs = [...state.pdfs];
   const hasAttachments = hasImages || pendingPdfs.length > 0;
+  const hasHistoricalImages = historyHasImages(state.history);
   const thinkValue = getThinkPayload(model, info);
 
   if (!prompt && !hasAttachments) return;
+
+  // Historical images remain part of the exact conversation context. Blocking
+  // before provisional UI/history changes preserves the draft and avoids a
+  // misleading request that silently omits information the user can still see.
+  if (hasHistoricalImages && !supportsVision(info, model)) {
+    showError(
+      "This model can't continue this chat.",
+      `${model} does not support the images in earlier messages. Choose a vision-capable model or start a new chat.`
+    );
+    setStatus("Choose a vision-capable model or start a new chat.");
+    return;
+  }
 
   if (hasAttachments && !supportsVision(info, model)) {
     const message = `The selected model, ${model}, does not support image input.`;
     const hint = imageSupportHint(model);
     showError(message, hint);
     setStatus("Choose a vision-capable model before sending images.");
-    createMessage("assistant", message, "preflight check");
     return;
   }
 
@@ -1700,11 +1800,14 @@ async function sendChat() {
     hasAttachments ? `${userContent}\n\n[${attachmentLabel} attached]` : userContent
   );
 
+  // The bubble becomes the visible owner of the submitted text while the
+  // locked composer stays empty. The catch path restores this exact draft.
+  el("prompt").value = "";
   setBusy(true, pendingPdfs.length ? `Preparing PDF 1 of ${pendingPdfs.length}…` : "Waiting for model…");
   let assistant = null;
 
   try {
-    assistant = createAssistantMessage(`model: ${model}`);
+    assistant = createAssistantMessage(`Model: ${model}`);
     state.assistantPre = assistant.answerPre;
     state.assistantPendingBubble = assistant.answerNode;
     state.assistantWait = assistant.pending;
@@ -1730,9 +1833,8 @@ async function sendChat() {
     });
     state.history.push({ role: "user", content: userContent, images: attachments });
 
-    // Keep the visible draft and raw File objects untouched until persistence
-    // succeeds. A failed attempt can then be retried without reconstructing or
-    // duplicating prompt text and attachments.
+    // Keep raw File objects untouched until persistence succeeds. A failed
+    // attempt can then reuse them alongside the restored text draft.
 
     beginGenerationMonitor();
     setBusy(true, "Waiting for model…");
@@ -1756,7 +1858,9 @@ async function sendChat() {
         thinking = thinking || fallback.thinking;
       }
     }
-    state.history.push({ role: "assistant", content: reply, thinking });
+    // Keep the generating model with the response for accurate mixed-model
+    // history. The outbound serializer deliberately removes this UI metadata.
+    state.history.push({ role: "assistant", content: reply, thinking, model });
 
     if (reply) {
       renderMarkdown(state.assistantPre, reply);
@@ -1797,6 +1901,10 @@ async function sendChat() {
       ? imageSupportHint(model)
       : `${publicMessage} Your message and attachments are ready to send again.`;
     const referenceId = error.referenceId || requestId;
+
+    // Restore the exact submitted draft before unlocking the composer so the
+    // user never sees an empty editable field after a failed request.
+    el("prompt").value = draftText;
 
     // The request UI is provisional until a complete answer is saved. Removing
     // it avoids leaving a stale Thinking indicator or duplicating the failure in

@@ -225,9 +225,19 @@ test("serves the chat shell and its required assets", async () => {
   const html = await index.text();
   assert.match(html, /id="conversationList"/);
   assert.match(html, /src="\/chat-history\.js"/);
+  assert.match(html, /src="\/vendor\/katex\/katex\.min\.js"/);
+  assert.match(html, /src="\/math-renderer\.js"/);
   assert.ok(html.indexOf('/chat-history.js') < html.indexOf('/app.js'));
 
-  for (const asset of ["/app.js", "/chat-history.js", "/style.css"]) {
+  for (const asset of [
+    "/app.js",
+    "/chat-history.js",
+    "/math-renderer.js",
+    "/style.css",
+    "/vendor/katex/katex.min.css",
+    "/vendor/katex/katex.min.js",
+    "/vendor/katex/fonts/KaTeX_Main-Regular.woff2",
+  ]) {
     const response = await fetch(`${appBase}${asset}`);
     assert.equal(response.status, 200, asset);
     assert.equal(response.headers.get("cache-control"), "no-cache", asset);

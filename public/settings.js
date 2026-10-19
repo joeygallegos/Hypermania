@@ -116,12 +116,23 @@ async function saveOllamaConfig() {
   }
 }
 
+function saveSystemInstruction() {
+  const instruction = el("systemInstruction").value.trim();
+  preferences.setSystemInstruction(instruction);
+  el("systemInstruction").value = instruction;
+  setNotice(instruction
+    ? "System instruction saved. It will apply to future messages."
+    : "System instruction disabled for future messages.");
+}
+
 const contextSelect = el("contextSize");
 const savedContextSize = preferences.getContextSize();
 contextSelect.value = [...contextSelect.options].some((option) => option.value === savedContextSize) ? savedContextSize : "8192";
 preferences.setContextSize(contextSelect.value);
+el("systemInstruction").value = preferences.getSystemInstruction();
 el("thinkMode").addEventListener("change", () => preferences.setThinkMode(el("thinkMode").value));
 el("contextSize").addEventListener("change", () => preferences.setContextSize(el("contextSize").value));
 el("refreshModels").addEventListener("click", loadModels);
 el("saveOllamaBase").addEventListener("click", saveOllamaConfig);
+el("saveSystemInstruction").addEventListener("click", saveSystemInstruction);
 Promise.all([loadOllamaConfig(), loadModels()]);

@@ -99,6 +99,9 @@ tar -C "$SOURCE_DIR" \
   --exclude='./*.log' \
   --exclude='./.env' \
   -cf - . | tar -C "$INSTALL_DIR" -xf -
+# KaTeX is a runtime dependency used by the browser through Hypermania's local
+# static route. Install production packages before locking down ownership.
+npm ci --omit=dev --prefix "$INSTALL_DIR"
 chown -R root:root "$INSTALL_DIR"
 touch "$INSTALL_DIR/${SERVICE_NAME}.log"
 chown "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR/${SERVICE_NAME}.log"

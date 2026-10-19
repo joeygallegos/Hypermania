@@ -6,6 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Hypermania</title>
   <link rel="stylesheet" href="/style.css" />
+  <link rel="stylesheet" href="/vendor/katex/katex.min.css" />
 </head>
 
 <body>
@@ -16,6 +17,7 @@
       </div>
       <div class="hero-actions">
         <label class="model-picker" for="model">
+          <span class="visually-hidden">Active model</span>
           <select id="model" aria-describedby="modelMeta"></select>
         </label>
         <a class="secondary nav-link" href="/settings.html">Settings</a>
@@ -42,7 +44,7 @@
             <h2 id="activeChatTitle">New chat</h2>
           </div>
           <a class="secondary nav-link mobile-history-link" href="#chatHistoryTitle">Chats</a>
-          <div id="modelMeta" class="model-meta" aria-live="polite"></div>
+          <div id="modelMeta" class="model-meta" aria-live="polite" aria-atomic="true"></div>
         </div>
         <select id="thinkMode" hidden aria-hidden="true"></select>
         <select id="contextSize" hidden aria-hidden="true">
@@ -89,6 +91,8 @@
 
   <script src="/preferences.js"></script>
   <script src="/chat-history.js"></script>
+  <script src="/vendor/katex/katex.min.js"></script>
+  <script src="/math-renderer.js"></script>
   <script src="/app.js"></script>
 </body>
 

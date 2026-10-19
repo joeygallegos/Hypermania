@@ -62,6 +62,17 @@
             </select>
             <div class="hint think-hint">Sent as Ollama <code>options.num_ctx</code>. Higher values use more VRAM.</div>
           </label>
+
+          <div class="setting-block">
+            <label for="systemInstruction">System instruction</label>
+            <textarea id="systemInstruction" rows="4" maxlength="4000" aria-describedby="systemInstructionHint"></textarea>
+            <div id="systemInstructionHint" class="hint think-hint">
+              Sent before the conversation on every future request. Leave blank to send no system instruction.
+            </div>
+            <div class="settings-actions">
+              <button id="saveSystemInstruction" type="button">Save instruction</button>
+            </div>
+          </div>
         </div>
       </section>
     </main>

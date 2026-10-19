@@ -10,6 +10,7 @@ const { Readable } = require("stream");
 
 const PORT = Number(process.env.PORT || 3111);
 const PUBLIC_DIR = path.join(__dirname, "public");
+const KATEX_DIST_DIR = path.join(__dirname, "node_modules", "katex", "dist");
 const DEFAULT_LOG_FILE = path.join(__dirname, "hypermania.log");
 
 function configuredLogFile(value)
@@ -247,8 +248,11 @@ function sendText(res, status, body, contentType = "text/plain; charset=utf-8")
 function serveStatic(req, res)
 {
   const urlPath = req.url === "/" ? "/index.html" : req.url.split("?")[0];
-  const filePath = path.normalize(path.join(PUBLIC_DIR, urlPath));
-  if (!filePath.startsWith(PUBLIC_DIR))
+  const katexPrefix = "/vendor/katex/";
+  const root = urlPath.startsWith(katexPrefix) ? KATEX_DIST_DIR : PUBLIC_DIR;
+  const relativePath = urlPath.startsWith(katexPrefix) ? urlPath.slice(katexPrefix.length) : urlPath;
+  const filePath = path.resolve(root, relativePath.replace(/^[/\\]+/, ""));
+  if (filePath !== root && !filePath.startsWith(`${root}${path.sep}`))
   {
     sendText(res, 403, "Forbidden");
     return;
@@ -272,6 +276,8 @@ function serveStatic(req, res)
       ".jpg": "image/jpeg",
       ".jpeg": "image/jpeg",
       ".svg": "image/svg+xml",
+      ".woff": "font/woff",
+      ".woff2": "font/woff2",
     };
 
     res.writeHead(200, {
