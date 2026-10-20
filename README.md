@@ -58,12 +58,12 @@ You can also change the active endpoint from the **Settings** page using a hostn
 
 ## Using Hypermania
 
-- Hypermania reads installed models and capabilities directly from Ollama. Choose the active model from the chat header; use **Settings** for endpoint, thinking, context length, system instruction, and model refresh.
+- Hypermania reads installed models and capabilities directly from Ollama. Choose the active model from the chat header, or use the adjacent information button to review the model capabilities Ollama reports. Use **Settings** for endpoint, thinking, context length, system instruction, and model refresh.
 - Changing the model in an existing chat affects the next response and keeps earlier messages as context. New responses record which model generated them; older saved responses created before this metadata was added display **Model not recorded**.
 - Image uploads are blocked if the selected model does not support vision.
 - A chat containing directly uploaded images can only be continued with a vision-capable model because those earlier images remain part of its context.
 - A PDF's page images are sent on its first turn. Later turns retrieve at most six relevant pages (up to 24,000 characters of extracted text) instead of resending every page image. A vision model also receives the selected page images; a text-only model can continue from extractable text. Scanned or layout-dependent pages may still require a vision model.
-- **Thinking** is sent only when the selected model supports it; individual models may still ignore a chosen mode.
+- **Thinking** is sent only when the selected model supports it. A thinking selector appears beside capable models and shows the levels Ollama reports. Models with boolean-only thinking controls show **Auto**, **Off**, and **On**; **Low**, **Medium**, and **High** appear only for models that support named effort levels, such as GPT-OSS. Hypermania does not invent effort levels for models that do not advertise them, because unsupported values may be ignored, rejected, or resolved to the model's default.
 - **Context length** is passed to Ollama as `options.num_ctx`. Larger contexts consume more memory or VRAM.
 - **System instruction** is stored in the current browser and sent before every conversation. It defaults to requesting English unless the user asks for another language; edit it in **Settings**, or save it blank to disable it.
 - Markdown and TeX math are rendered after a response completes. During streaming, content stays plain text so the layout does not jump. Inline math may use `$...$` or `\(...\)`; display math may use `$$...$$` or `\[...\]`. Code spans and fenced code blocks remain literal.

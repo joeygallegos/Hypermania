@@ -16,13 +16,40 @@
         <h1 class="brand-logo" data-text="HYPERMANIA" aria-label="Hypermania">HYPERMANIA</h1>
       </div>
       <div class="hero-actions">
-        <label class="model-picker" for="model">
-          <span class="visually-hidden">Active model</span>
-          <select id="model" aria-describedby="modelMeta"></select>
-        </label>
+        <div class="model-control">
+          <label class="model-picker" for="model">
+            <span class="visually-hidden">Active model</span>
+            <select id="model" aria-describedby="modelMeta"></select>
+          </label>
+          <label id="thinkingControl" class="thinking-picker" for="thinkMode" hidden>
+            <span class="visually-hidden">Thinking level</span>
+            <select id="thinkMode" title="Thinking level"></select>
+          </label>
+          <button id="modelCapabilitiesButton" class="secondary model-info-button" type="button"
+            aria-label="Show selected model capabilities" aria-haspopup="dialog"
+            aria-controls="modelCapabilitiesDialog" title="Model capabilities">
+            <span aria-hidden="true">i</span>
+          </button>
+        </div>
         <a class="secondary nav-link" href="/settings.html">Settings</a>
       </div>
     </section>
+
+    <dialog id="modelCapabilitiesDialog" class="model-capabilities-dialog"
+      aria-labelledby="modelCapabilitiesTitle" aria-describedby="modelCapabilitiesSummary">
+      <div class="model-capabilities-panel">
+        <div class="model-capabilities-head">
+          <div>
+            <p class="section-kicker">Selected model</p>
+            <h2 id="modelCapabilitiesTitle">Model capabilities</h2>
+          </div>
+          <button id="closeModelCapabilities" class="secondary model-capabilities-close" type="button"
+            aria-label="Close model capabilities">Close</button>
+        </div>
+        <p id="modelCapabilitiesSummary" class="model-capabilities-summary" role="status" aria-atomic="true"></p>
+        <ul id="modelCapabilitiesList" class="model-capabilities-list"></ul>
+      </div>
+    </dialog>
 
     <section class="chat-workspace">
       <aside class="panel chat-history" aria-labelledby="chatHistoryTitle">
@@ -46,7 +73,6 @@
           <a class="secondary nav-link mobile-history-link" href="#chatHistoryTitle">Chats</a>
           <div id="modelMeta" class="model-meta" aria-live="polite" aria-atomic="true"></div>
         </div>
-        <select id="thinkMode" hidden aria-hidden="true"></select>
         <select id="contextSize" hidden aria-hidden="true">
           <option value="4096">4k</option>
           <option value="8192">8k</option>

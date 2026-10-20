@@ -11,6 +11,8 @@ const state = {
   pdfs: [],
   models: [],
   modelInfo: new Map(),
+  modelInfoErrors: new Set(),
+  modelInfoLoading: new Set(),
   contextSize: Number.parseInt(window.hypermaniaPreferences.getContextSize(), 10) || 8192,
   thinkMode: window.hypermaniaPreferences.getThinkMode(),
   assistantPre: null,
@@ -547,6 +549,7 @@ function setBusy(isBusy, statusText = "") {
   const attachmentToggle = el("attachmentToggle");
   const dropzone = el("dropzone");
   el("model").disabled = isBusy;
+  el("thinkMode").disabled = isBusy || el("thinkingControl").hidden;
   el("prompt").disabled = isBusy;
   attachmentToggle.disabled = isBusy;
   dropzone.classList.toggle("disabled", isBusy);
@@ -1047,23 +1050,57 @@ function isGptOssModel(modelName, info) {
   return /gpt[- ]?oss/i.test(modelName) || /gpt[- ]?oss/i.test(family);
 }
 
+function supportsThinking(info) {
+  const capabilities = Array.isArray(info?.capabilities) ? info.capabilities : [];
+  const values = Array.isArray(info?.thinking?.values) ? info.thinking.values : [];
+  // Ollama uses [false] to explicitly report that the think request field is
+  // unavailable, even if older or imported metadata claims the capability.
+  return capabilities.includes("thinking") && !(values.length === 1 && values[0] === false);
+}
+
 function renderThinkOptions(modelName, info) {
   const select = el("thinkMode");
+  const control = el("thinkingControl");
+  const supported = supportsThinking(info);
+  control.hidden = !supported;
+  control.parentElement.classList.toggle("has-thinking", supported);
+  select.disabled = state.requestInProgress || !supported;
+
+  if (!supported) {
+    select.replaceChildren();
+    return;
+  }
+
   const gptOss = isGptOssModel(modelName, info);
   const selected = state.thinkMode || "auto";
+  const reportedValues = Array.isArray(info?.thinking?.values) ? info.thinking.values : [];
+  let options;
 
-  const options = gptOss
-    ? [
-        ["auto", "Auto"],
-        ["low", "Low"],
-        ["medium", "Medium"],
-        ["high", "High"],
-      ]
-    : [
-        ["auto", "Auto"],
-        ["off", "Off"],
-        ["on", "On"],
-      ];
+  if (reportedValues.length) {
+    options = [["auto", "Thinking: Auto"]];
+    for (const value of reportedValues) {
+      if (value === false) options.push(["off", "Thinking: Off"]);
+      else if (value === true) options.push(["on", "Thinking: On"]);
+      else if (typeof value === "string" && value.trim()) {
+        const normalized = value.trim();
+        const label = normalized.replace(/[-_]+/g, " ").replace(/^./, (character) => character.toUpperCase());
+        options.push([normalized, `Thinking: ${label}`]);
+      }
+    }
+  } else {
+    options = gptOss
+      ? [
+          ["auto", "Thinking: Auto"],
+          ["low", "Thinking: Low"],
+          ["medium", "Thinking: Medium"],
+          ["high", "Thinking: High"],
+        ]
+      : [
+          ["auto", "Thinking: Auto"],
+          ["off", "Thinking: Off"],
+          ["on", "Thinking: On"],
+        ];
+  }
 
   select.innerHTML = "";
   for (const [value, label] of options) {
@@ -1073,7 +1110,12 @@ function renderThinkOptions(modelName, info) {
     select.appendChild(option);
   }
 
-  const fallback = gptOss ? "medium" : "auto";
+  let reportedDefault = info?.thinking?.default;
+  if (reportedDefault === true) reportedDefault = "on";
+  if (reportedDefault === false) reportedDefault = "off";
+  const fallback = options.some(([value]) => value === reportedDefault)
+    ? reportedDefault
+    : gptOss && !reportedValues.length ? "medium" : "auto";
   select.value = options.some(([value]) => value === selected) ? selected : fallback;
   state.thinkMode = select.value;
   window.hypermaniaPreferences.setThinkMode(state.thinkMode);
@@ -1087,7 +1129,17 @@ function renderThinkOptions(modelName, info) {
 }
 
 function getThinkPayload(modelName, info) {
+  if (!supportsThinking(info)) return undefined;
+
   const mode = state.thinkMode;
+  const reportedValues = Array.isArray(info?.thinking?.values) ? info.thinking.values : [];
+  if (reportedValues.length) {
+    if (mode === "off" && reportedValues.includes(false)) return false;
+    if (mode === "on" && reportedValues.includes(true)) return true;
+    if (reportedValues.includes(mode)) return mode;
+    return undefined;
+  }
+
   if (isGptOssModel(modelName, info)) {
     if (mode === "low" || mode === "medium" || mode === "high") {
       return mode;
@@ -1225,6 +1277,94 @@ function formatCapabilities(info, modelName) {
   return capabilities;
 }
 
+const MODEL_CAPABILITY_DETAILS = {
+  completion: {
+    label: "Text generation",
+    description: "Understands prompts and generates text responses.",
+  },
+  vision: {
+    label: "Vision",
+    description: "Accepts images with text and can answer questions about what they contain.",
+  },
+  tools: {
+    label: "Tool calling",
+    description: "Can request function calls when an app provides tools. Hypermania does not currently provide callable tools.",
+  },
+  thinking: {
+    label: "Thinking",
+    description: "Can return reasoning separately from its final response.",
+  },
+  embedding: {
+    label: "Embeddings",
+    description: "Creates numeric representations for search and similarity workflows.",
+  },
+  insert: {
+    label: "Text insertion",
+    description: "Can generate text that fits between a supplied prefix and suffix.",
+  },
+};
+
+function renderModelCapabilities() {
+  const modelName = el("model").value;
+  const info = state.modelInfo.get(modelName);
+  const summary = el("modelCapabilitiesSummary");
+  const list = el("modelCapabilitiesList");
+  list.replaceChildren();
+
+  if (!modelName) {
+    summary.textContent = "No model is selected.";
+    return;
+  }
+
+  if (!info) {
+    summary.textContent = state.modelInfoErrors.has(modelName)
+      ? `Ollama could not provide capability details for ${modelName}.`
+      : `Loading capabilities reported by Ollama for ${modelName}…`;
+    return;
+  }
+
+  // Use only Ollama's reported list here. Filename heuristics are useful for
+  // attachment safeguards, but would overstate what the model advertises.
+  const capabilities = [...new Set(
+    (Array.isArray(info.capabilities) ? info.capabilities : [])
+      .filter((capability) => typeof capability === "string" && capability.trim())
+      .map((capability) => capability.trim().toLowerCase().slice(0, 64))
+  )].slice(0, 24);
+  summary.textContent = capabilities.length
+    ? `Capabilities reported by Ollama for ${modelName}.`
+    : `Ollama did not report any capabilities for ${modelName}. This does not necessarily mean the model has none.`;
+
+  for (const capability of capabilities) {
+    const details = MODEL_CAPABILITY_DETAILS[capability] || {
+      label: capability.replace(/[-_]+/g, " ").replace(/^./, (character) => character.toUpperCase()),
+      description: "Reported by Ollama; Hypermania does not have a specific description for this capability yet.",
+    };
+    const item = document.createElement("li");
+    const heading = document.createElement("h3");
+    const description = document.createElement("p");
+    heading.textContent = details.label;
+    description.textContent = details.description;
+    item.append(heading, description);
+    list.appendChild(item);
+  }
+}
+
+function openModelCapabilities() {
+  const model = el("model").value;
+  if (model && !state.modelInfo.has(model) && state.modelInfoErrors.delete(model)) {
+    renderModelMeta();
+  }
+  renderModelCapabilities();
+  if (!el("modelCapabilitiesDialog").open) el("modelCapabilitiesDialog").showModal();
+  el("closeModelCapabilities").focus();
+
+  // Reopening after a failure retries, while the loading set prevents a second
+  // request when background model annotation is already fetching this model.
+  if (model && !state.modelInfo.has(model) && !state.modelInfoLoading.has(model)) {
+    refreshModelInfo(model, true);
+  }
+}
+
 function renderModelMeta() {
   const container = el("modelMeta");
   container.innerHTML = "";
@@ -1236,6 +1376,8 @@ function renderModelMeta() {
 
   if (!modelName) {
     summary.textContent = "No model selected";
+  } else if (!info && state.modelInfoErrors.has(modelName)) {
+    summary.textContent = `${modelName} · details unavailable`;
   } else if (!info) {
     summary.textContent = `${modelName} · loading details…`;
   } else {
@@ -1295,6 +1437,8 @@ async function loadModels() {
   const select = el("model");
   select.innerHTML = "";
   state.modelInfo.clear();
+  state.modelInfoErrors.clear();
+  state.modelInfoLoading.clear();
   debugLog("load_models_start");
 
   try {
@@ -1355,12 +1499,14 @@ async function loadModels() {
 }
 
 async function refreshModelInfo(model, immediate = false) {
-  if (!model) return;
+  if (!model || state.modelInfoLoading.has(model)) return;
+  state.modelInfoLoading.add(model);
   debugLog("model_info_start", { model });
 
   try {
     const info = await fetchModelInfo(model);
     state.modelInfo.set(model, info);
+    state.modelInfoErrors.delete(model);
 
     const option = [...el("model").options].find((candidate) => candidate.value === model);
     if (option) {
@@ -1369,12 +1515,17 @@ async function refreshModelInfo(model, immediate = false) {
     }
   } catch {
     // Keep fallback heuristics if the model details call fails.
+    state.modelInfoErrors.add(model);
     debugLog("model_info_error", { model });
   } finally {
-    if (immediate) {
+    state.modelInfoLoading.delete(model);
+    // A slower request for the previous selection must not replace the current
+    // model's thinking controls after the user switches models.
+    if (immediate && el("model").value === model) {
       renderModelMeta();
       renderThinkOptions(model, state.modelInfo.get(model));
     }
+    if (el("modelCapabilitiesDialog").open) renderModelCapabilities();
   }
 }
 
@@ -1384,6 +1535,7 @@ function annotateOptionsInBackground() {
     refreshModelInfo(option.value).then(() => {
       if (el("model").value === option.value) {
         renderModelMeta();
+        renderThinkOptions(option.value, state.modelInfo.get(option.value));
       }
     });
   }
@@ -2033,16 +2185,29 @@ function attachFileHandling() {
 
 el("send").addEventListener("click", sendChat);
 el("newChat").addEventListener("click", () => startNewConversation());
+el("modelCapabilitiesButton").addEventListener("click", openModelCapabilities);
+el("closeModelCapabilities").addEventListener("click", () => el("modelCapabilitiesDialog").close());
+el("modelCapabilitiesDialog").addEventListener("close", () => el("modelCapabilitiesButton").focus());
+el("modelCapabilitiesDialog").addEventListener("click", (event) => {
+  // A native dialog handles focus containment and Escape. Only clicks on the
+  // backdrop itself close it; clicks within the panel keep it open.
+  if (event.target === el("modelCapabilitiesDialog")) el("modelCapabilitiesDialog").close();
+});
 
 el("model").addEventListener("change", () => {
   const model = el("model").value;
   window.hypermaniaPreferences.setModel(model);
   if (!state.modelInfo.has(model)) {
+    // Clear controls from the previous model while this selection's metadata
+    // loads; only a confirmed thinking capability should expose the selector.
+    renderModelMeta();
+    renderThinkOptions(model, undefined);
     refreshModelInfo(model, true);
   } else {
     renderModelMeta();
     renderThinkOptions(model, state.modelInfo.get(model));
   }
+  if (el("modelCapabilitiesDialog").open) renderModelCapabilities();
   clearError();
 });
 

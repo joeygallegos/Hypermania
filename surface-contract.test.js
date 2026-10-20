@@ -82,6 +82,30 @@ test("model switching keeps context clear, attributable, and accessible", () => 
   assert.doesNotMatch(app, /createMessage\("assistant", message, "preflight check"\)/);
 });
 
+test("model capability details use an accessible dialog and reported Ollama data", () => {
+  assert.match(html, /id="modelCapabilitiesButton"[\s\S]*?aria-haspopup="dialog"[\s\S]*?aria-controls="modelCapabilitiesDialog"/);
+  assert.match(html, /<dialog id="modelCapabilitiesDialog"[\s\S]*?aria-labelledby="modelCapabilitiesTitle"/);
+  assert.match(app, /const MODEL_CAPABILITY_DETAILS = \{/);
+  assert.match(app, /Array\.isArray\(info\.capabilities\) \? info\.capabilities : \[\]/);
+  assert.match(app, /Hypermania does not currently provide callable tools\./);
+  assert.match(app, /modelInfoLoading: new Set\(\)/);
+  assert.match(app, /showModal\(\)/);
+  assert.match(app, /addEventListener\("close", \(\) => el\("modelCapabilitiesButton"\)\.focus\(\)\)/);
+  assert.match(app, /if \(event\.target === el\("modelCapabilitiesDialog"\)\)/);
+  assert.match(scss, /\.model-capabilities-dialog::backdrop/);
+});
+
+test("thinking controls appear only for capable models and preserve reported levels", () => {
+  assert.match(html, /id="thinkingControl" class="thinking-picker" for="thinkMode" hidden/);
+  assert.match(html, /<span class="visually-hidden">Thinking level<\/span>/);
+  assert.match(app, /function supportsThinking\(info\)/);
+  assert.match(app, /capabilities\.includes\("thinking"\)/);
+  assert.match(app, /control\.hidden = !supported/);
+  assert.match(app, /Array\.isArray\(info\?\.thinking\?\.values\)/);
+  assert.match(app, /if \(!supportsThinking\(info\)\) return undefined/);
+  assert.match(scss, /\.model-control\.has-thinking\s*\{[\s\S]*?grid-template-columns:/);
+});
+
 test("system instruction is editable, persisted, and included in future requests", () => {
   assert.match(settingsHtml, /<label for="systemInstruction">System instruction<\/label>/);
   assert.match(settingsHtml, /id="systemInstruction"[\s\S]*?aria-describedby="systemInstructionHint"/);
