@@ -2,6 +2,7 @@ const state = {
   threadId: makeConversationId(),
   activeRequestId: null,
   history: [],
+  documents: [],
   conversations: [],
   activeConversation: null,
   preferredConversationModel: "",
@@ -32,9 +33,15 @@ const {
   isValidHistoryMessage,
   toOllamaMessages,
 } = window.hypermaniaChatHistory;
+const {
+  buildDocumentMessages,
+  isValidDocumentContext,
+} = window.hypermaniaDocumentContext;
 const CHAT_DB_NAME = "hypermania-chats";
 const CHAT_DB_VERSION = 1;
-const CHAT_SCHEMA_VERSION = 1;
+const CHAT_SCHEMA_VERSION = 2;
+const LEGACY_CHAT_SCHEMA_VERSION = 1;
+const MAX_CONVERSATION_DOCUMENTS = 16;
 const CHAT_JOB_POLL_MS = 400;
 const CHAT_JOB_HIDDEN_POLL_MS = 2000;
 const CHAT_JOB_FETCH_TIMEOUT_MS = 15000;
@@ -226,6 +233,7 @@ function startNewConversation({ focus = true, confirmDraft = true } = {}) {
   if (state.requestInProgress) return;
   if (confirmDraft && !confirmDraftDiscard("start a new chat")) return;
   state.history = [];
+  state.documents = [];
   state.activeConversation = null;
   state.threadId = makeConversationId();
   state.preferredConversationModel = "";
@@ -248,7 +256,7 @@ function renderStoredConversation(conversation) {
   try {
     for (const message of state.history) {
       if (message.role === "user") {
-        const attachmentCount = message.images?.length || 0;
+        const attachmentCount = (message.images?.length || 0) + (message.documentIds?.length || 0);
         const attachmentNote = attachmentCount
           ? `\n\n[${attachmentCount} saved attachment${attachmentCount === 1 ? "" : "s"}]`
           : "";
@@ -313,8 +321,11 @@ async function selectConversation(id, { focus = true, confirmDraft = true } = {}
     const database = await openChatDatabase();
     const transaction = database.transaction("conversationData", "readonly");
     const record = await requestResult(transaction.objectStore("conversationData").get(id));
-    if (!record || record.schemaVersion !== CHAT_SCHEMA_VERSION || !Array.isArray(record.history)
-      || !record.history.every(isValidHistoryMessage)) {
+    const supportedSchema = record?.schemaVersion === LEGACY_CHAT_SCHEMA_VERSION
+      || record?.schemaVersion === CHAT_SCHEMA_VERSION;
+    const documents = record?.schemaVersion === CHAT_SCHEMA_VERSION ? record.documents : [];
+    if (!record || !supportedSchema || !Array.isArray(record.history)
+      || !record.history.every(isValidHistoryMessage) || !isValidDocumentContext(record.history, documents)) {
       throw new Error("This saved chat is damaged or uses an unsupported format.");
     }
 
@@ -325,6 +336,7 @@ async function selectConversation(id, { focus = true, confirmDraft = true } = {}
       ? conversation.threadId
       : isTraceId(conversation.id) ? conversation.id : makeConversationId();
     state.history = record.history;
+    state.documents = documents;
     resetDraft();
     clearError();
     updateActiveChatHeading();
@@ -382,6 +394,7 @@ async function persistCurrentConversation() {
     id: summary.id,
     schemaVersion: CHAT_SCHEMA_VERSION,
     history: state.history,
+    documents: state.documents,
   });
   await completion;
 
@@ -479,13 +492,18 @@ function getContextLength() {
   return value;
 }
 
-function buildRequestBody(model, messages, thinkValue, stream) {
+function buildRequestBody(model, messages, thinkValue, stream, documentContext = {}) {
+  const systemInstruction = window.hypermaniaPreferences.getSystemInstruction();
   const body = {
     model,
-    messages: toOllamaMessages(
-      messages,
-      window.hypermaniaPreferences.getSystemInstruction()
-    ),
+    messages: documentContext.mode === "none"
+      ? toOllamaMessages(messages, systemInstruction)
+      : buildDocumentMessages({
+        history: messages,
+        documents: state.documents,
+        systemInstruction,
+        ...documentContext,
+      }),
     stream,
   };
 
@@ -1118,7 +1136,10 @@ async function polishFinalAnswer(model, messages, thinking, promptText) {
     thinkingChars: cleanThinkingText(thinking).length,
   });
 
-  const result = await fetchChatOnce(model, polishMessages, false);
+  // The first pass already consumed the source documents and produced the
+  // reasoning being polished. Reattaching document pages here would repeat the
+  // expensive vision prefill without adding evidence to this formatting pass.
+  const result = await fetchChatOnce(model, polishMessages, false, { mode: "none" });
   debugLog("polish_complete", {
     requestId: state.activeRequestId,
     replyChars: result.content.length,
@@ -1381,8 +1402,8 @@ function isPdf(file) {
   return file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf");
 }
 
-async function renderPdf(file, attachmentIndex, attachmentCount) {
-  const dataUrl = await fileToDataUrl(file);
+async function renderPdf(pdf, attachmentIndex, attachmentCount) {
+  const dataUrl = await fileToDataUrl(pdf.file);
   const response = await fetch("/api/pdf/render", {
     method: "POST",
     headers: traceHeaders(),
@@ -1398,11 +1419,18 @@ async function renderPdf(file, attachmentIndex, attachmentCount) {
   }
   if (!Array.isArray(result.images) || !result.images.length) throw new Error("PDF rendering returned no pages.");
 
-  return result.images.map((base64, index) => ({
-    name: `${file.name} - page ${index + 1}`,
-    dataUrl: `data:image/png;base64,${base64}`,
-    base64,
-  }));
+  const pageMetadata = Array.isArray(result.pages) && result.pages.length === result.images.length
+    ? result.pages
+    : result.images.map((_, index) => ({ pageNumber: index + 1, imageIndex: index, text: "" }));
+  return {
+    id: pdf.id,
+    name: pdf.name,
+    pages: pageMetadata.map((page, index) => ({
+      number: page.pageNumber || index + 1,
+      text: typeof page.text === "string" ? page.text : "",
+      image: result.images[page.imageIndex ?? index],
+    })),
+  };
 }
 
 async function ingestFiles(fileList, { append = true, pasted = false } = {}) {
@@ -1414,7 +1442,9 @@ async function ingestFiles(fileList, { append = true, pasted = false } = {}) {
     const pdfs = [];
     for (const file of files) {
       if (isPdf(file)) {
-        pdfs.push({ name: file.name, file });
+        // The artifact survives a failed send in memory, so Retry can reuse the
+        // completed Poppler work instead of rendering every page again.
+        pdfs.push({ id: makeConversationId(), name: file.name, file, artifact: null });
         continue;
       }
       const dataUrl = await fileToDataUrl(file);
@@ -1423,6 +1453,11 @@ async function ingestFiles(fileList, { append = true, pasted = false } = {}) {
         dataUrl,
         base64: dataUrl.split(",")[1],
       });
+    }
+
+    const nextPdfCount = append ? state.pdfs.length + pdfs.length : pdfs.length;
+    if (state.documents.length + nextPdfCount > MAX_CONVERSATION_DOCUMENTS) {
+      throw new Error(`A conversation can contain up to ${MAX_CONVERSATION_DOCUMENTS} PDFs. Start a new chat to attach more.`);
     }
 
     state.images = append ? [...state.images, ...uploaded] : uploaded;
@@ -1497,8 +1532,8 @@ function imageSupportHint(modelName) {
   return `Install a vision model such as gemma3, llama4, qwen2.5-vl, or another multimodal Ollama model, then refresh the model list.`;
 }
 
-async function streamChat(model, messages, thinkValue) {
-  const requestBody = buildRequestBody(model, messages, thinkValue, true);
+async function streamChat(model, messages, thinkValue, documentContext = {}) {
+  const requestBody = buildRequestBody(model, messages, thinkValue, true, documentContext);
   setBusy(true, "Waiting for model…");
   const startResponse = await fetch("/api/chat/jobs", {
     method: "POST",
@@ -1721,8 +1756,8 @@ async function streamChat(model, messages, thinkValue) {
   return { content: full, thinking: cleanThinkingText(thinkingFull) };
 }
 
-async function fetchChatOnce(model, messages, thinkValue) {
-  const requestBody = buildRequestBody(model, messages, thinkValue, false);
+async function fetchChatOnce(model, messages, thinkValue, documentContext = {}) {
+  const requestBody = buildRequestBody(model, messages, thinkValue, false, documentContext);
 
   const res = await fetch("/api/chat", {
     method: "POST",
@@ -1794,6 +1829,7 @@ async function sendChat() {
   state.activeRequestId = requestId;
   state.requestInProgress = true;
   const historyStartIndex = state.history.length;
+  const documentsStartIndex = state.documents.length;
 
   const renderedUserMessage = addMessage(
     "user",
@@ -1814,14 +1850,19 @@ async function sendChat() {
     state.assistantWaitLabel = assistant.pendingLabel;
     setAssistantAnswerText(state.assistantPre, "");
 
-    const renderedAttachments = [];
+    const currentDocuments = [];
     if (pendingPdfs.length) {
       for (const [index, pdf] of pendingPdfs.entries()) {
         setBusy(true, `Preparing PDF ${index + 1} of ${pendingPdfs.length}…`);
-        renderedAttachments.push(...await renderPdf(pdf.file, index + 1, pendingPdfs.length));
+        if (!pdf.artifact) {
+          pdf.artifact = await renderPdf(pdf, index + 1, pendingPdfs.length);
+        }
+        currentDocuments.push(pdf.artifact);
       }
     }
-    const attachments = [...directAttachments, ...renderedAttachments.map((image) => image.base64)];
+    state.documents.push(...currentDocuments);
+    const currentDocumentIds = currentDocuments.map((document) => document.id);
+    const documentImageCount = currentDocuments.reduce((total, document) => total + document.pages.length, 0);
     debugLog("send_start", {
       requestId,
       model,
@@ -1829,9 +1870,13 @@ async function sendChat() {
       thinkValue: thinkValue === undefined ? "default" : String(thinkValue),
       numCtx: getContextLength() ?? "default",
       promptChars: userContent.length,
-      imageCount: attachments.length,
+      imageCount: directAttachments.length + documentImageCount,
+      documentCount: currentDocuments.length,
     });
-    state.history.push({ role: "user", content: userContent, images: attachments });
+    const userMessage = { role: "user", content: userContent };
+    if (directAttachments.length) userMessage.images = directAttachments;
+    if (currentDocumentIds.length) userMessage.documentIds = currentDocumentIds;
+    state.history.push(userMessage);
 
     // Keep raw File objects untouched until persistence succeeds. A failed
     // attempt can then reuse them alongside the restored text draft.
@@ -1839,7 +1884,13 @@ async function sendChat() {
     beginGenerationMonitor();
     setBusy(true, "Waiting for model…");
 
-    let { content: reply, thinking } = await streamChat(model, state.history, thinkValue);
+    const documentContext = {
+      mode: "context",
+      currentDocumentIds,
+      query: userContent,
+      includeImages: supportsVision(info, model),
+    };
+    let { content: reply, thinking } = await streamChat(model, state.history, thinkValue, documentContext);
     if (!reply) {
       debugLog("stream_without_final_answer", {
         requestId,
@@ -1853,7 +1904,7 @@ async function sendChat() {
         reply = polished.content || reply;
         thinking = thinking || polished.thinking;
       } else {
-        const fallback = await fetchChatOnce(model, state.history, false);
+        const fallback = await fetchChatOnce(model, state.history, false, documentContext);
         reply = fallback.content || reply;
         thinking = thinking || fallback.thinking;
       }
@@ -1892,6 +1943,7 @@ async function sendChat() {
     // added. Restore the exact pre-send history so retry never duplicates a
     // user or assistant entry, regardless of which request phase failed.
     state.history.splice(historyStartIndex);
+    state.documents.splice(documentsStartIndex);
     const diagnostic = extractErrorDetails(error.message || String(error));
     const publicMessage = error.publicMessage
       || (diagnostic.toLowerCase().includes("multimodal")

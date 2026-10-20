@@ -8,7 +8,9 @@
     root.hypermaniaChatHistory = helpers;
   }
 }(typeof globalThis === "object" ? globalThis : this, () => {
-  const HISTORY_MESSAGE_KEYS = new Set(["role", "content", "images", "thinking", "model"]);
+  const HISTORY_MESSAGE_KEYS = new Set(["role", "content", "images", "thinking", "model", "documentIds"]);
+  const MAX_DOCUMENTS_PER_MESSAGE = 16;
+  const MAX_DOCUMENT_ID_CHARS = 128;
 
   function isValidHistoryMessage(message) {
     // Saved data is untrusted input: browser extensions, older app versions, or
@@ -17,6 +19,12 @@
     if (Object.keys(message).some((key) => !HISTORY_MESSAGE_KEYS.has(key))) return false;
     if (message.images !== undefined && (!Array.isArray(message.images) || message.images.some((image) => typeof image !== "string"))) return false;
     if (message.images !== undefined && message.role !== "user") return false;
+    if (message.documentIds !== undefined && (message.role !== "user"
+      || !Array.isArray(message.documentIds)
+      || message.documentIds.length > MAX_DOCUMENTS_PER_MESSAGE
+      || new Set(message.documentIds).size !== message.documentIds.length
+      || message.documentIds.some((id) => typeof id !== "string" || !id.trim()
+        || id !== id.trim() || id.length > MAX_DOCUMENT_ID_CHARS))) return false;
     if (message.thinking !== undefined && (message.role !== "assistant" || typeof message.thinking !== "string")) return false;
     return message.model === undefined
       || (message.role === "assistant" && typeof message.model === "string" && Boolean(message.model.trim()));

@@ -33,6 +33,7 @@ test("isValidHistoryMessage accepts the exact persisted Ollama context", () => {
   assert.equal(isValidHistoryMessage({ role: "user", content: "See this", images: ["base64-image"] }), true);
   assert.equal(isValidHistoryMessage({ role: "assistant", content: "Answer", thinking: "Reasoning" }), true);
   assert.equal(isValidHistoryMessage({ role: "assistant", content: "Answer", model: "model-a" }), true);
+  assert.equal(isValidHistoryMessage({ role: "user", content: "See PDF", documentIds: ["pdf-1"] }), true);
 });
 
 test("isValidHistoryMessage rejects malformed saved data", () => {
@@ -43,6 +44,10 @@ test("isValidHistoryMessage rejects malformed saved data", () => {
   assert.equal(isValidHistoryMessage({ role: "assistant", content: "Answer", thinking: {} }), false);
   assert.equal(isValidHistoryMessage({ role: "user", content: "Hello", model: "model-a" }), false);
   assert.equal(isValidHistoryMessage({ role: "assistant", content: "Answer", unexpected: true }), false);
+  assert.equal(isValidHistoryMessage({ role: "assistant", content: "Answer", documentIds: ["pdf-1"] }), false);
+  assert.equal(isValidHistoryMessage({ role: "user", content: "Hello", documentIds: ["pdf-1", "pdf-1"] }), false);
+  assert.equal(isValidHistoryMessage({ role: "user", content: "Hello", documentIds: [" padded "] }), false);
+  assert.equal(isValidHistoryMessage({ role: "user", content: "Hello", documentIds: new Array(17).fill("pdf") }), false);
 });
 
 test("toOllamaMessages preserves context while removing local model attribution", () => {
@@ -60,6 +65,14 @@ test("toOllamaMessages preserves context while removing local model attribution"
     { role: "user", content: "Continue" },
   ]);
   assert.equal(history[1].model, "model-a");
+});
+
+test("toOllamaMessages never forwards local document references", () => {
+  assert.deepEqual(toOllamaMessages([
+    { role: "user", content: "Review it", documentIds: ["pdf-1"] },
+  ]), [
+    { role: "user", content: "Review it" },
+  ]);
 });
 
 test("toOllamaMessages prepends a trimmed system instruction when configured", () => {

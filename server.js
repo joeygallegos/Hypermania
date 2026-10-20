@@ -31,6 +31,9 @@ const execFileAsync = promisify(execFile);
 const MAX_PDF_BYTES = 25 * 1024 * 1024;
 const MAX_PDF_PAGES = 32;
 const MAX_RENDERED_PDF_BYTES = 40 * 1024 * 1024;
+const MAX_PDF_TEXT_CHARS = 512 * 1024;
+const MAX_PDF_TEXT_PER_PAGE_CHARS = 64 * 1024;
+const MAX_PDF_TEXT_BUFFER_BYTES = 2 * 1024 * 1024;
 const MAX_CHAT_JOBS = 50;
 const MAX_CHAT_JOB_CHARS = 8 * 1024 * 1024;
 const MAX_CHAT_JOB_RUNTIME_MS = 30 * 60 * 1000;
@@ -40,7 +43,35 @@ const TRACE_ID_PATTERN = /^[a-f0-9]{8}-[a-f0-9]{4}-[1-5][a-f0-9]{3}-[89ab][a-f0-
 const MAX_PDF_REQUEST_BYTES = Math.ceil((MAX_PDF_BYTES * 4) / 3) + 1024 * 1024;
 const chatJobs = new Map();
 
+const OLLAMA_TELEMETRY_FIELDS = {
+  total_duration: "totalDurationNs",
+  load_duration: "loadDurationNs",
+  prompt_eval_count: "promptEvalCount",
+  prompt_eval_cached_count: "promptEvalCachedCount",
+  prompt_eval_duration: "promptEvalDurationNs",
+  eval_count: "evalCount",
+  eval_duration: "evalDurationNs",
+};
+
 class PdfInputError extends Error { }
+
+function configuredPdfToolRunner(value)
+{
+  if (value === undefined) return undefined;
+  if (!value || !path.isAbsolute(value) || value.includes("\0"))
+  {
+    throw new Error("HYPERMANIA_PDF_TOOL_RUNNER must be an absolute file path.");
+  }
+  return path.normalize(value);
+}
+
+const PDF_TOOL_RUNNER = configuredPdfToolRunner(process.env.HYPERMANIA_PDF_TOOL_RUNNER);
+
+function runPdfTool(tool, args, options)
+{
+  if (!PDF_TOOL_RUNNER) return execFileAsync(tool, args, options);
+  return execFileAsync(process.execPath, [PDF_TOOL_RUNNER, tool, ...args], options);
+}
 
 function normalizeOllamaBase(value)
 {
@@ -385,16 +416,67 @@ async function getPdfPageCount(pdfPath)
 {
   try
   {
-    const { stdout } = await execFileAsync("pdfinfo", [pdfPath], { timeout: 15000 });
+    const { stdout } = await runPdfTool("pdfinfo", [pdfPath], {
+      timeout: 15000,
+      maxBuffer: 1024 * 1024,
+      windowsHide: true,
+    });
     const match = stdout.match(/^Pages:\s+(\d+)\s*$/m);
     return match ? Number.parseInt(match[1], 10) : null;
   } catch (error)
   {
     if (error.code === "ENOENT")
     {
-      throw new PdfInputError("PDF support requires Poppler. Install Poppler so pdfinfo and pdftoppm are available on the server.");
+      throw new PdfInputError("PDF support requires Poppler. Install Poppler so pdfinfo, pdftotext, and pdftoppm are available on the server.");
     }
     throw new PdfInputError("Could not inspect this PDF. It may be corrupted or password-protected.");
+  }
+}
+
+function pageAlignedPdfText(stdout, pageCount)
+{
+  const extracted = String(stdout || "").replace(/\r\n?/g, "\n").split("\f");
+  let remainingChars = MAX_PDF_TEXT_CHARS;
+
+  return Array.from({ length: pageCount }, (_, index) =>
+  {
+    const text = (extracted[index] || "").trim();
+    const retainedChars = Math.min(text.length, MAX_PDF_TEXT_PER_PAGE_CHARS, remainingChars);
+    const retainedText = text.slice(0, retainedChars);
+    remainingChars -= retainedText.length;
+    return {
+      pageNumber: index + 1,
+      imageIndex: index,
+      text: retainedText,
+      textTruncated: retainedText.length < text.length,
+    };
+  });
+}
+
+async function extractPdfText(pdfPath, pageCount)
+{
+  try
+  {
+    const { stdout } = await runPdfTool(
+      "pdftotext",
+      ["-layout", "-enc", "UTF-8", pdfPath, "-"],
+      {
+        timeout: 30000,
+        maxBuffer: MAX_PDF_TEXT_BUFFER_BYTES,
+        windowsHide: true,
+      }
+    );
+    return pageAlignedPdfText(stdout, pageCount);
+  } catch (error)
+  {
+    if (error.code === "ENOENT")
+    {
+      throw new PdfInputError("PDF support requires Poppler. Install Poppler so pdfinfo, pdftotext, and pdftoppm are available on the server.");
+    }
+
+    // Text is an optimization rather than a rendering prerequisite. Scans and
+    // PDFs with unusual encodings still remain usable through their page images.
+    return pageAlignedPdfText("", pageCount);
   }
 }
 
@@ -440,17 +522,20 @@ async function handlePdfRender(req, res)
       throw new PdfInputError(`PDFs are limited to ${MAX_PDF_PAGES} pages. Split this document into smaller files and try again.`);
     }
 
+    const pages = await extractPdfText(inputPath, pageCount);
+
     try
     {
-      await execFileAsync("pdftoppm", ["-png", "-r", "150", inputPath, outputPrefix], {
+      await runPdfTool("pdftoppm", ["-png", "-r", "150", inputPath, outputPrefix], {
         timeout: 120000,
         maxBuffer: 1024 * 1024,
+        windowsHide: true,
       });
     } catch (error)
     {
       if (error.code === "ENOENT")
       {
-        throw new PdfInputError("PDF support requires Poppler. Install Poppler so pdfinfo and pdftoppm are available on the server.");
+        throw new PdfInputError("PDF support requires Poppler. Install Poppler so pdfinfo, pdftotext, and pdftoppm are available on the server.");
       }
       throw new PdfInputError("Could not render this PDF. It may be corrupted or password-protected.");
     }
@@ -482,8 +567,11 @@ async function handlePdfRender(req, res)
       pages: pageCount,
       inputBytes: pdf.length,
       outputBytes: totalBytes,
+      textPages: pages.filter((page) => page.text).length,
+      textChars: pages.reduce((total, page) => total + page.text.length, 0),
+      textTruncated: pages.some((page) => page.textTruncated),
     });
-    sendJson(res, 200, { images, pageCount });
+    sendJson(res, 200, { images, pageCount, pages });
   } catch (error)
   {
     const expected = error instanceof PdfInputError || error.statusCode === 413;
@@ -630,6 +718,41 @@ function appendChatJobData(job, text)
   job.updatedAt = Date.now();
 }
 
+function observeOllamaTelemetry(job, text, flush = false)
+{
+  // Ollama may split an NDJSON object across arbitrary transport chunks. Keep
+  // only an incomplete line here; completed response text remains in job.data.
+  job.telemetryBuffer += text;
+  const lines = job.telemetryBuffer.split("\n");
+  job.telemetryBuffer = flush ? "" : lines.pop();
+  if (flush && lines.at(-1) === "") lines.pop();
+
+  for (const line of lines)
+  {
+    if (!line.trim()) continue;
+    let payload;
+    try
+    {
+      payload = JSON.parse(line);
+    } catch
+    {
+      continue;
+    }
+    if (payload?.done !== true) continue;
+
+    // Model output, prompts, images, filenames, and context are deliberately
+    // excluded. Only bounded numeric performance counters may reach the log.
+    for (const [source, target] of Object.entries(OLLAMA_TELEMETRY_FIELDS))
+    {
+      const value = payload[source];
+      if (typeof value === "number" && Number.isFinite(value) && value >= 0)
+      {
+        job.telemetry[target] = value;
+      }
+    }
+  }
+}
+
 async function runChatJob(job, body)
 {
   // Mobile browsers may suspend or discard their response connection. Owning
@@ -658,9 +781,13 @@ async function runChatJob(job, body)
     {
       const { done, value } = await reader.read();
       if (done) break;
-      appendChatJobData(job, decoder.decode(value, { stream: true }));
+      const text = decoder.decode(value, { stream: true });
+      appendChatJobData(job, text);
+      observeOllamaTelemetry(job, text);
     }
-    appendChatJobData(job, decoder.decode());
+    const trailing = decoder.decode();
+    appendChatJobData(job, trailing);
+    observeOllamaTelemetry(job, trailing, true);
     job.status = "complete";
   } catch (error)
   {
@@ -683,6 +810,7 @@ async function runChatJob(job, body)
       jobId: job.id,
       status: job.status,
       chars: job.data.length,
+      ...job.telemetry,
       error: job.errorDetails || undefined,
     });
   }
@@ -733,6 +861,8 @@ async function handleChatJobs(req, res)
       status: "running",
       data: "",
       error: "",
+      telemetry: {},
+      telemetryBuffer: "",
       updatedAt: Date.now(),
     };
     chatJobs.set(job.id, job);

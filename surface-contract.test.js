@@ -7,6 +7,7 @@ const projectDirectory = __dirname;
 const html = fs.readFileSync(path.join(projectDirectory, "public", "index.html"), "utf8");
 const settingsHtml = fs.readFileSync(path.join(projectDirectory, "public", "settings.html"), "utf8");
 const app = fs.readFileSync(path.join(projectDirectory, "public", "app.js"), "utf8");
+const documentContext = fs.readFileSync(path.join(projectDirectory, "public", "document-context.js"), "utf8");
 const settings = fs.readFileSync(path.join(projectDirectory, "public", "settings.js"), "utf8");
 const scss = fs.readFileSync(path.join(projectDirectory, "public", "style.scss"), "utf8");
 
@@ -76,7 +77,8 @@ test("model switching keeps context clear, attributable, and accessible", () => 
   assert.match(app, /Previous messages in this chat will be included as context\./);
   assert.match(app, /This model can't continue this chat\./);
   assert.match(app, /state\.history\.push\(\{ role: "assistant", content: reply, thinking, model \}\)/);
-  assert.match(app, /messages: toOllamaMessages\([\s\S]*?messages/);
+  assert.match(app, /messages: documentContext\.mode === "none"[\s\S]*?buildDocumentMessages\(/);
+  assert.match(documentContext, /const selectedPages = selectDocumentPages/);
   assert.doesNotMatch(app, /createMessage\("assistant", message, "preflight check"\)/);
 });
 
@@ -85,7 +87,8 @@ test("system instruction is editable, persisted, and included in future requests
   assert.match(settingsHtml, /id="systemInstruction"[\s\S]*?aria-describedby="systemInstructionHint"/);
   assert.match(settingsHtml, /Leave blank to send no system instruction\./);
   assert.match(settings, /preferences\.setSystemInstruction\(instruction\)/);
-  assert.match(app, /toOllamaMessages\([\s\S]*?getSystemInstruction\(\)/);
+  assert.match(app, /const systemInstruction = window\.hypermaniaPreferences\.getSystemInstruction\(\)/);
+  assert.match(app, /buildDocumentMessages\([\s\S]*?systemInstruction/);
 });
 
 test("thinking diagnostics report the start of reasoning only once per stream", () => {

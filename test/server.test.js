@@ -15,6 +15,7 @@ let appProcess;
 let appBase;
 let mockOllama;
 let mockOllamaBase;
+let pdfToolRunner;
 let lastChatRequest;
 let chatRequestCount = 0;
 let releaseHeldChat;
@@ -117,6 +118,32 @@ before(async () => {
   // consume stale diagnostics or append to the operator's production log.
   testDirectory = await fs.promises.mkdtemp(path.join(os.tmpdir(), "hypermania-test-"));
   logFile = path.join(testDirectory, "hypermania.log");
+  pdfToolRunner = path.join(testDirectory, "mock-poppler.js");
+  await fs.promises.writeFile(pdfToolRunner, `
+const fs = require("node:fs");
+const [, , tool, ...args] = process.argv;
+const inputPath = tool === "pdftoppm" ? args.at(-2) : args.at(-1) === "-" ? args.at(-2) : args.at(-1);
+const input = inputPath ? fs.readFileSync(inputPath, "utf8") : "";
+const bounded = input.includes("BOUNDED_TEXT");
+const pages = bounded ? 9 : 2;
+
+if (tool === "pdfinfo") {
+  process.stdout.write(\`Pages: \${pages}\\n\`);
+} else if (tool === "pdftotext") {
+  if (input.includes("TEXT_FAILURE")) process.exit(2);
+  const text = bounded
+    ? Array.from({ length: pages }, () => "x".repeat(65537))
+    : ["First page text", "Second page text"];
+  process.stdout.write(\`\${text.join("\\f")}\\f\`);
+} else if (tool === "pdftoppm") {
+  const prefix = args.at(-1);
+  for (let page = 1; page <= pages; page += 1) {
+    fs.writeFileSync(\`\${prefix}-\${page}.png\`, \`png-\${page}\`);
+  }
+} else {
+  process.exit(3);
+}
+`, "utf8");
 
   // Exercise the real HTTP server in a child process while keeping tests fast,
   // deterministic, and independent of the user's installed Ollama models.
@@ -160,6 +187,25 @@ before(async () => {
         res.end(output.subarray(emojiStart + 2));
         return;
       }
+      if (lastChatRequest.messages?.at(-1)?.content === "split-telemetry") {
+        const output = `${JSON.stringify({
+          message: { content: "private model output" },
+          context: [11, 22, 33],
+          done: true,
+          total_duration: 9000000000,
+          load_duration: 1000000,
+          prompt_eval_count: 4096,
+          prompt_eval_cached_count: 4000,
+          prompt_eval_duration: 8000000000,
+          eval_count: 12,
+          eval_duration: 999000000,
+        })}\n`;
+        const splitAt = output.indexOf("prompt_eval_cached_count") + 14;
+        res.write(output.slice(0, splitAt));
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        res.end(output.slice(splitAt));
+        return;
+      }
       if (lastChatRequest.messages?.at(-1)?.content.startsWith("isolation-")) {
         const content = lastChatRequest.messages.at(-1).content;
         res.end(`${JSON.stringify({ message: { content }, done: true })}\n`);
@@ -190,6 +236,7 @@ before(async () => {
     env: {
       ...process.env,
       HYPERMANIA_LOG_FILE: logFile,
+      HYPERMANIA_PDF_TOOL_RUNNER: pdfToolRunner,
       OLLAMA_BASE: mockOllamaBase,
       PORT: String(appPort),
     },
@@ -225,13 +272,16 @@ test("serves the chat shell and its required assets", async () => {
   const html = await index.text();
   assert.match(html, /id="conversationList"/);
   assert.match(html, /src="\/chat-history\.js"/);
+  assert.match(html, /src="\/document-context\.js"/);
   assert.match(html, /src="\/vendor\/katex\/katex\.min\.js"/);
   assert.match(html, /src="\/math-renderer\.js"/);
   assert.ok(html.indexOf('/chat-history.js') < html.indexOf('/app.js'));
+  assert.ok(html.indexOf('/document-context.js') < html.indexOf('/app.js'));
 
   for (const asset of [
     "/app.js",
     "/chat-history.js",
+    "/document-context.js",
     "/math-renderer.js",
     "/style.css",
     "/vendor/katex/katex.min.css",
@@ -357,6 +407,53 @@ test("preserves Unicode split across upstream byte chunks", async () => {
   // The browser sends offsets back as JavaScript string positions, including
   // the surrogate pair used by the emoji—not raw UTF-8 byte positions.
   assert.equal(completed.offset, expected.length);
+});
+
+test("logs allowlisted Ollama timing and prompt-cache metrics across split chunks", async () => {
+  const threadId = randomUUID();
+  const requestId = randomUUID();
+  const started = await fetch(`${appBase}/api/chat/jobs`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Hypermania-Thread-Id": threadId,
+      "X-Hypermania-Request-Id": requestId,
+    },
+    body: JSON.stringify({
+      model: "test-model:latest",
+      messages: [{ role: "user", content: "split-telemetry" }],
+      stream: true,
+    }),
+  });
+  assert.equal(started.status, 202);
+  const { id } = await started.json();
+  await waitForChatJob(id, (job) => job.status === "complete");
+
+  const logEntry = await waitForLogEntry(
+    requestId,
+    (entry) => entry.source === "chat_job" && entry.event === "finished"
+  );
+  assert.deepEqual({
+    totalDurationNs: logEntry.totalDurationNs,
+    loadDurationNs: logEntry.loadDurationNs,
+    promptEvalCount: logEntry.promptEvalCount,
+    promptEvalCachedCount: logEntry.promptEvalCachedCount,
+    promptEvalDurationNs: logEntry.promptEvalDurationNs,
+    evalCount: logEntry.evalCount,
+    evalDurationNs: logEntry.evalDurationNs,
+  }, {
+    totalDurationNs: 9000000000,
+    loadDurationNs: 1000000,
+    promptEvalCount: 4096,
+    promptEvalCachedCount: 4000,
+    promptEvalDurationNs: 8000000000,
+    evalCount: 12,
+    evalDurationNs: 999000000,
+  });
+  assert.doesNotMatch(
+    JSON.stringify(logEntry),
+    /private model output|context|messages|split-telemetry/
+  );
 });
 
 test("keeps concurrent retained responses isolated by job ID", async () => {
@@ -514,6 +611,75 @@ test("rejects malformed PDF uploads without invoking external tools", async () =
   assert.equal(logEntry.attachmentIndex, 2);
   assert.equal(logEntry.attachmentCount, 3);
   assert.equal(logEntry.status, 400);
+});
+
+test("renders PDF images and returns bounded page-aligned native text", async () => {
+  const requestId = randomUUID();
+  const response = await fetch(`${appBase}/api/pdf/render`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "X-Hypermania-Request-Id": requestId,
+    },
+    body: JSON.stringify({
+      data: Buffer.from("%PDF-1.7\nfixture").toString("base64"),
+      name: "private-filename.pdf",
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.deepEqual(result, {
+    images: [Buffer.from("png-1").toString("base64"), Buffer.from("png-2").toString("base64")],
+    pageCount: 2,
+    pages: [
+      { pageNumber: 1, imageIndex: 0, text: "First page text", textTruncated: false },
+      { pageNumber: 2, imageIndex: 1, text: "Second page text", textTruncated: false },
+    ],
+  });
+
+  const logEntry = await waitForLogEntry(
+    requestId,
+    (entry) => entry.source === "pdf" && entry.event === "rendered"
+  );
+  assert.equal(logEntry.textPages, 2);
+  assert.equal(logEntry.textChars, 31);
+  assert.equal(logEntry.textTruncated, false);
+  assert.doesNotMatch(JSON.stringify(logEntry), /First page text|private-filename\.pdf/);
+});
+
+test("caps extracted PDF text per page and across the complete document", async () => {
+  const response = await fetch(`${appBase}/api/pdf/render`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      data: Buffer.from("%PDF-1.7\nBOUNDED_TEXT").toString("base64"),
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  const { pages } = await response.json();
+  assert.equal(pages.length, 9);
+  assert.ok(pages.every((page) => page.text.length <= 64 * 1024));
+  assert.equal(pages.reduce((total, page) => total + page.text.length, 0), 512 * 1024);
+  assert.ok(pages.every((page) => page.textTruncated));
+  assert.equal(pages.at(-1).text, "");
+});
+
+test("keeps rendered pages usable when optional native-text extraction fails", async () => {
+  const response = await fetch(`${appBase}/api/pdf/render`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      data: Buffer.from("%PDF-1.7\nTEXT_FAILURE").toString("base64"),
+    }),
+  });
+
+  assert.equal(response.status, 200);
+  const result = await response.json();
+  assert.equal(result.images.length, 2);
+  assert.deepEqual(result.pages.map((page) => page.text), ["", ""]);
+  assert.deepEqual(result.pages.map((page) => page.imageIndex), [0, 1]);
 });
 
 test("returns 404 for missing static files", async () => {

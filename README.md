@@ -7,7 +7,7 @@ A focused, local-first chat interface for [Ollama](https://ollama.com). Hyperman
 - Connect to a local or trusted-network Ollama instance.
 - Stream chats live, with a model selector in chat and advanced behavior controls on a dedicated Settings page.
 - Reopen, continue, review, and delete completed conversations from local chat history.
-- Attach images or PDFs, preview the resulting pages, and send them to compatible vision models. PDFs are rendered locally into PNG page images before they reach Ollama.
+- Attach images or PDFs, preview the resulting pages, and send them to compatible vision models. PDFs are rendered locally into PNG page images, while native page text is retained for efficient follow-up questions.
 - Refresh installed models without restarting the UI.
 - Run as a small Node.js service or install it with the included Linux systemd helper.
 
@@ -61,7 +61,8 @@ You can also change the active endpoint from the **Settings** page using a hostn
 - Hypermania reads installed models and capabilities directly from Ollama. Choose the active model from the chat header; use **Settings** for endpoint, thinking, context length, system instruction, and model refresh.
 - Changing the model in an existing chat affects the next response and keeps earlier messages as context. New responses record which model generated them; older saved responses created before this metadata was added display **Model not recorded**.
 - Image uploads are blocked if the selected model does not support vision.
-- A chat containing images can only be continued with a vision-capable model because earlier image messages remain part of its context.
+- A chat containing directly uploaded images can only be continued with a vision-capable model because those earlier images remain part of its context.
+- A PDF's page images are sent on its first turn. Later turns retrieve at most six relevant pages (up to 24,000 characters of extracted text) instead of resending every page image. A vision model also receives the selected page images; a text-only model can continue from extractable text. Scanned or layout-dependent pages may still require a vision model.
 - **Thinking** is sent only when the selected model supports it; individual models may still ignore a chosen mode.
 - **Context length** is passed to Ollama as `options.num_ctx`. Larger contexts consume more memory or VRAM.
 - **System instruction** is stored in the current browser and sent before every conversation. It defaults to requesting English unless the user asks for another language; edit it in **Settings**, or save it blank to disable it.
@@ -69,7 +70,7 @@ You can also change the active endpoint from the **Settings** page using a hostn
 - Chat generation runs on the Hypermania server, so a mobile browser can suspend the tab and catch up on missed response chunks when it returns. Recoverable results are held in server memory for up to six hours; restarting Hypermania clears them.
 - The attachment tray supports selecting, appending, reviewing, and individually removing images or PDFs. Paste clipboard images into the message box to attach them, too.
 - Press **Enter** to send a message; use **Shift+Enter** for a new line.
-- Completed conversations are saved in the browser with IndexedDB. Chat history is specific to the current browser profile and exact Hypermania address, so changing devices, browser profiles, hostnames, or ports shows a different history.
+- Completed conversations are saved in the browser with IndexedDB, including PDF page text and images needed for follow-ups. Chat history is specific to the current browser profile and exact Hypermania address, so changing devices, browser profiles, hostnames, or ports shows a different history.
 - Use **New chat** to start a blank conversation. Select a saved chat to review or continue it, or use its trash-can control to permanently remove it from this browser's Hypermania storage.
 - Each conversation has a stable thread ID. Each send has a separate request ID that follows its PDF rendering, model generation, and log entries. Failed sends preserve the draft and attachments, offer a retry, and show the request ID as a safe support reference.
 - Browser events and server request summaries are appended to `hypermania.log` beside `server.js`. To trace a reported failure, search that file for the request ID shown in the UI; matching entries also include the conversation `threadId` and, for model generations, the server `jobId`.
@@ -118,8 +119,8 @@ If you edit `hypermania.env`, restart the service for changes to apply. Re-runni
 - In-progress and recently completed responses are retained in server memory for reconnecting browsers. Retention is bounded to 50 responses, 8 million characters per response, six hours after completion, and 30 minutes of generation time.
 - The browser endpoint control may be changed only from the local machine; use `OLLAMA_BASE` for the durable default.
 - Ollama must be reachable by the machine and account running Hypermania. For the default setup, ensure `ollama serve` or the Ollama system service is running.
-- Image and PDF input requires a multimodal model. Text-only models are identified in the UI and will not receive attachments. PDF rendering requires Poppler (`pdfinfo` and `pdftoppm`) on the Hypermania server; PDFs are limited to 25 MB and 32 pages.
-- Error banners intentionally show a high-level reason instead of raw server or Ollama diagnostics. Detailed technical failures are recorded with correlation IDs, but prompts, file names, attachments, and model output are not deliberately logged.
+- New image and PDF input requires a multimodal model. Text-only models are identified in the UI and will not receive new attachments, but they can continue a PDF conversation when useful page text was extracted. PDF processing requires Poppler (`pdfinfo`, `pdftotext`, and `pdftoppm`) on the Hypermania server; PDFs are limited to 25 MB and 32 pages, and conversations are limited to 16 PDFs.
+- Error banners intentionally show a high-level reason instead of raw server or Ollama diagnostics. Detailed technical failures are recorded with correlation IDs. Terminal Ollama timing and token/cache counters are logged when available, but prompts, file names, attachments, extracted text, and model output are not deliberately logged.
 - `hypermania.log` grows over time; rotate or archive it as part of normal host maintenance.
 
 ## Development
@@ -142,7 +143,7 @@ Run the core regression suite with:
 npm test
 ```
 
-The suite validates saved-chat and math-rendering contracts and starts an isolated Hypermania server with a mock Ollama endpoint to test static assets, proxy streaming, context forwarding, configuration, and common error responses.
+The suite validates saved-chat, document-context, and math-rendering contracts and starts an isolated Hypermania server with mock Ollama and PDF tools to test static assets, proxy streaming, PDF text extraction, bounded follow-up context, configuration, and common error responses.
 
 Run the faster dependency-free surface and diagnostic contract checks with:
 
