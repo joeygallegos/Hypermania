@@ -280,6 +280,9 @@ test("serves the chat shell and its required assets", async () => {
 
   for (const asset of [
     "/app.js",
+    "/prompt-library.js",
+    "/saved-prompts.js",
+    "/prompts.html",
     "/chat-history.js",
     "/document-context.js",
     "/math-renderer.js",

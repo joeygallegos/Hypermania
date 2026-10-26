@@ -11,16 +11,44 @@ const documentContext = fs.readFileSync(path.join(projectDirectory, "public", "d
 const settings = fs.readFileSync(path.join(projectDirectory, "public", "settings.js"), "utf8");
 const scss = fs.readFileSync(path.join(projectDirectory, "public", "style.scss"), "utf8");
 
+test("prompt management has its own blue page and preserves chat in another tab", () => {
+  const prompts = fs.readFileSync(path.join(projectDirectory, "public", "prompts.html"), "utf8");
+  assert.match(html, /href="\/prompts.html" target="_blank" rel="noopener"/);
+  assert.doesNotMatch(html, /savedPromptsDialog|src="\/saved-prompts.js"/);
+  assert.match(prompts, /<body class="prompts-page">/);
+  assert.match(prompts, /id="savedPromptForm"/);
+  assert.match(prompts, /id="savedPromptHistory"/);
+  assert.match(prompts, /id="copySavedPrompt"/);
+  assert.match(prompts, /src="\/prompt-library.js"[\s\S]*src="\/saved-prompts.js"/);
+  assert.match(scss, /\.prompts-page\s*\{[\s\S]*?--accent: #79baff;/);
+});
+
 test("mobile surface keeps the conversation primary and history reachable", () => {
   // These source contracts complement eventual browser geometry checks: they
   // protect the deliberate mobile reading order without claiming to emulate a
   // layout engine in the dependency-free Node test suite.
   assert.match(html, /<section class="panel chat" aria-labelledby="activeChatTitle">/);
   assert.match(html, /class="secondary nav-link mobile-history-link" href="#chatHistoryTitle"/);
-  assert.match(scss, /@media \(max-width: 820px\)[\s\S]*?\.chat\s*\{[\s\S]*?order:\s*-1;[\s\S]*?height:\s*calc\(100svh - 153px\);/);
+  assert.match(scss, /@media \(max-width: 820px\)[\s\S]*?\.chat\s*\{[\s\S]*?order:\s*-1;[\s\S]*?height:\s*calc\(100svh - 110px\);/);
   assert.match(scss, /@media \(max-width: 820px\)[\s\S]*?\.chat-history\s*\{[\s\S]*?max-height:\s*none;[\s\S]*?overflow:\s*visible;/);
   assert.match(scss, /@media \(max-width: 820px\)[\s\S]*?\.conversation-list\s*\{[\s\S]*?overflow-y:\s*visible;/);
-  assert.match(scss, /@media \(max-width: 680px\)[\s\S]*?\.chat-hero \.hero-actions\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\) auto;/);
+  assert.match(scss, /@media \(max-width: 560px\)[\s\S]*?\.header-navigation\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\) auto;/);
+});
+
+test("app header holds navigation while conversation header holds model controls", () => {
+  const header = html.match(/<header class="hero chat-hero">([\s\S]*?)<\/header>/)?.[1];
+  assert.ok(header);
+  assert.match(header, /<nav class="header-navigation" aria-label="Main navigation">[\s\S]*?href="\/prompts.html"[\s\S]*?href="\/settings.html"[\s\S]*?<\/nav>/);
+  assert.doesNotMatch(header, /id="model"|id="thinkMode"|id="modelCapabilitiesButton"/);
+  const conversationHead = html.match(/<div class="chat-head">([\s\S]*?)<select id="contextSize"/)?.[1];
+  assert.ok(conversationHead);
+  for (const id of ["model", "thinkMode", "modelCapabilitiesButton", "modelMeta"]) {
+    assert.ok(conversationHead.includes(`id="${id}"`));
+    assert.equal(html.split(`id="${id}"`).length - 1, 1);
+  }
+  assert.match(app, /summary.className = "model-meta-summary visually-hidden"/);
+  assert.equal((html.match(/href="\/prompts.html"/g) || []).length, 1);
+  assert.match(scss, /\.conversation-model-controls[\s\S]*?min-width: 0;/);
 });
 
 test("attachment inventory exposes removable named items and aggregate state", () => {
@@ -72,7 +100,7 @@ test("saved chat deletion uses a compact accessible icon control", () => {
 });
 
 test("model switching keeps context clear, attributable, and accessible", () => {
-  assert.match(html, /<span class="visually-hidden">Active model<\/span>/);
+  assert.match(html, /<span class="section-kicker">Active model<\/span>/);
   assert.match(html, /id="modelMeta" class="model-meta" aria-live="polite" aria-atomic="true"/);
   assert.match(app, /Previous messages in this chat will be included as context\./);
   assert.match(app, /This model can't continue this chat\./);
@@ -97,7 +125,7 @@ test("model capability details use an accessible dialog and reported Ollama data
 
 test("thinking controls appear only for capable models and preserve reported levels", () => {
   assert.match(html, /id="thinkingControl" class="thinking-picker" for="thinkMode" hidden/);
-  assert.match(html, /<span class="visually-hidden">Thinking level<\/span>/);
+  assert.match(html, /<span class="section-kicker">Thinking level<\/span>/);
   assert.match(app, /function supportsThinking\(info\)/);
   assert.match(app, /capabilities\.includes\("thinking"\)/);
   assert.match(app, /control\.hidden = !supported/);

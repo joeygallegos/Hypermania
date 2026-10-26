@@ -1,0 +1,57 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Prompt library · Hypermania</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body class="prompts-page">
+    <main class="shell prompts-shell">
+      <header class="hero">
+        <div>
+          <p class="section-kicker">Hypermania</p>
+          <h1>Prompt library</h1>
+          <p>Create reusable prompts and keep track of every saved change.</p>
+        </div>
+        <a class="secondary nav-link" href="/">Back to chat</a>
+      </header>
+
+      <section class="panel prompts-panel" aria-labelledby="savedPromptsTitle">
+        <div class="page-head">
+          <div>
+            <h2 id="savedPromptsTitle">Manage prompts</h2>
+            <p>Stored only in this browser. Copy a prompt to reuse it in chat.</p>
+          </div>
+          <button id="reloadSavedPrompts" type="button" class="secondary">Reload prompts</button>
+        </div>
+        <p id="savedPromptsStatus" role="status" aria-live="polite" aria-atomic="true"></p>
+        <div class="saved-prompts-layout">
+          <nav aria-label="Saved prompts">
+            <button id="newSavedPrompt" type="button">New prompt</button>
+            <p id="emptySavedPrompts">No saved prompts yet. Create your first prompt using the editor.</p>
+            <ul id="savedPromptList" class="saved-prompt-list"></ul>
+          </nav>
+          <form id="savedPromptForm" class="saved-prompt-editor">
+            <label for="savedPromptTitle">Prompt name</label>
+            <input id="savedPromptTitle" type="text" maxlength="120" required />
+            <label for="savedPromptContent">Prompt text</label>
+            <textarea id="savedPromptContent" rows="12" maxlength="50000" required></textarea>
+            <div class="saved-prompt-actions">
+              <button type="submit">Save version</button>
+              <button id="copySavedPrompt" type="button" class="secondary">Copy prompt</button>
+              <button id="deleteSavedPrompt" type="button" class="secondary" disabled>Delete prompt</button>
+            </div>
+            <section id="savedPromptHistory" hidden aria-labelledby="savedPromptHistoryTitle">
+              <h3 id="savedPromptHistoryTitle">Version history</h3>
+              <p>Each saved change keeps the previous name and text. Expand a version to compare.</p>
+              <div id="savedPromptVersions"></div>
+            </section>
+          </form>
+        </div>
+      </section>
+    </main>
+    <script src="/prompt-library.js"></script>
+    <script src="/saved-prompts.js"></script>
+  </body>
+</html>

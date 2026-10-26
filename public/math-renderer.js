@@ -41,8 +41,11 @@
     // A leading amount is currency unless the contents contain clear math
     // syntax. This keeps pairs such as "$55 today and $27 tomorrow" readable
     // while still accepting model output such as "$55 \\div 2 = ...$".
-    const startsLikeCurrency = /^\d[\d,.]*(?:\s|$)/.test(candidate);
-    const hasMathSyntax = /\\[A-Za-z]+|[=+*/^_{}]|\s[-]\s|[×÷≤≥≠]/.test(candidate);
+    const startsLikeCurrency = /^\d[\d,.]*/.test(candidate);
+    // Rates such as /month and /year are prose, not division. A slash only
+    // signals math when followed by a number, group, TeX command, or variable.
+    const hasDivision = /\/\s*(?:\d|\(|\\[A-Za-z]+|[A-Za-z](?![A-Za-z]))/.test(candidate);
+    const hasMathSyntax = /\\[A-Za-z]+|[=+*^_{}]|\s[-]\s|[×÷≤≥≠]/.test(candidate) || hasDivision;
     return !startsLikeCurrency || hasMathSyntax;
   }
 

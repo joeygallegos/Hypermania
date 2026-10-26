@@ -7,6 +7,7 @@ A focused, local-first chat interface for [Ollama](https://ollama.com). Hyperman
 - Connect to a local or trusted-network Ollama instance.
 - Stream chats live, with a model selector in chat and advanced behavior controls on a dedicated Settings page.
 - Reopen, continue, review, and delete completed conversations from local chat history.
+- Save reusable prompts with dated version history and copy them into chat.
 - Attach images or PDFs, preview the resulting pages, and send them to compatible vision models. PDFs are rendered locally into PNG page images, while native page text is retained for efficient follow-up questions.
 - Refresh installed models without restarting the UI.
 - Run as a small Node.js service or install it with the included Linux systemd helper.
@@ -58,7 +59,7 @@ You can also change the active endpoint from the **Settings** page using a hostn
 
 ## Using Hypermania
 
-- Hypermania reads installed models and capabilities directly from Ollama. Choose the active model from the chat header, or use the adjacent information button to review the model capabilities Ollama reports. Use **Settings** for endpoint, thinking, context length, system instruction, and model refresh.
+- Hypermania reads installed models and capabilities directly from Ollama. Choose the active model and thinking level from the conversation header, or use the adjacent information button to review the model capabilities Ollama reports. Use **Settings** for endpoint, thinking, context length, system instruction, and model refresh.
 - Changing the model in an existing chat affects the next response and keeps earlier messages as context. New responses record which model generated them; older saved responses created before this metadata was added display **Model not recorded**.
 - Image uploads are blocked if the selected model does not support vision.
 - A chat containing directly uploaded images can only be continued with a vision-capable model because those earlier images remain part of its context.
@@ -70,6 +71,8 @@ You can also change the active endpoint from the **Settings** page using a hostn
 - Chat generation runs on the Hypermania server, so a mobile browser can suspend the tab and catch up on missed response chunks when it returns. Recoverable results are held in server memory for up to six hours; restarting Hypermania clears them.
 - The attachment tray supports selecting, appending, reviewing, and individually removing images or PDFs. Paste clipboard images into the message box to attach them, too.
 - Press **Enter** to send a message; use **Shift+Enter** for a new line.
+- Open **Manage prompts** in the header to launch the dedicated blue **Prompt library** management page in a new tab, preserving your current chat. Create or select a reusable prompt there. Edit its name or text and choose **Save version** to keep a dated snapshot; unchanged saves do not add versions. Expand **Version history** to review earlier text. **Copy prompt** copies the editor text to paste into chat. If clipboard access is blocked, the text is selected for manual copying. **Delete prompt** permanently removes that prompt and its versions.
+- Saved prompts and all versions are stored unencrypted in this browser's local storage, specific to this Hypermania address. They are not synced or sent to the server until used in a message; clearing site data removes them. Storage failures preserve editor text for copying. Use **Reload prompts** if another tab changes the library (copy any unsaved edits first); avoid editing the library simultaneously in multiple tabs.
 - Completed conversations are saved in the browser with IndexedDB, including PDF page text and images needed for follow-ups. Chat history is specific to the current browser profile and exact Hypermania address, so changing devices, browser profiles, hostnames, or ports shows a different history.
 - Use **New chat** to start a blank conversation. Select a saved chat to review or continue it, or use its trash-can control to permanently remove it from this browser's Hypermania storage.
 - Each conversation has a stable thread ID. Each send has a separate request ID that follows its PDF rendering, model generation, and log entries. Failed sends preserve the draft and attachments, offer a retry, and show the request ID as a safe support reference.

@@ -105,25 +105,37 @@ body::after {
   align-items: center;
 }
 
-// Equal outer tracks keep the model centered independently of the different
-// widths of the brand and Settings link. The wrapper contributes its children
-// directly to this grid so each header control has its own alignment role.
+// The app header holds navigation; model controls belong to the active conversation.
 .chat-hero {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) minmax(420px, 560px) minmax(0, 1fr);
-  align-items: end;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 16px;
+  padding: 16px 20px;
 }
 
-.chat-hero .hero-actions {
-  display: contents;
+.header-navigation {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+
+  .nav-link { min-height: 44px; gap: 8px; justify-content: center; }
+  .nav-link.prompt-library-link {
+    color: #c9e4ff;
+    background: rgba(121, 186, 255, 0.08);
+    border-color: rgba(121, 186, 255, 0.3);
+  }
+  .nav-link:hover { border-color: currentColor; }
 }
 
-.chat-hero .hero-copy {
-  align-self: center;
-}
+.conversation-model-controls {
+  flex: 1 1 360px;
+  min-width: 0;
+  max-width: 560px;
 
-.chat-hero .nav-link {
-  justify-self: end;
+  .model-control { min-width: 0; align-items: end; }
+  .model-picker { min-width: 0; }
+  label { gap: 6px; }
 }
 
 .nav-link {
@@ -884,6 +896,8 @@ button.secondary {
 }
 
 .chat-head {
+  flex-wrap: wrap;
+  align-items: start;
   margin-bottom: 16px;
   flex: 0 0 auto;
 }
@@ -904,6 +918,88 @@ button.secondary {
 .model-capabilities-panel {
   min-height: 100%;
   padding: 22px;
+}
+
+// Scope the blue palette to prompt management so chat and Settings retain their theme.
+.prompts-page {
+  --text: #e0efff;
+  --muted: #b4d4f5;
+  --muted-2: #8cbcf0;
+  --accent: #79baff;
+  --accent-2: #4e9deb;
+  --border: rgba(121, 186, 255, 0.24);
+  overflow: auto;
+  background: radial-gradient(ellipse at top left, #112c49, #060d18 65%);
+
+  &::before, &::after { display: none; }
+  .hero, .panel { background: #0c192a; }
+  h1 { margin-block: 8px; font-size: clamp(1.6rem, 4vw, 2.4rem); }
+  p { color: var(--muted); line-height: 1.6; }
+  .section-kicker { color: var(--accent); }
+  input, textarea {
+    background: #071321;
+    border-color: var(--border);
+    font: inherit;
+  }
+  .secondary {
+    background: #142c46;
+    border: 1px solid var(--border);
+    color: var(--text);
+  }
+  .hero { flex-wrap: wrap; }
+  .page-head { flex-wrap: wrap; }
+}
+
+.prompts-shell {
+  height: auto;
+  min-height: 100vh;
+  max-width: 1200px;
+}
+
+.prompts-panel {
+  padding: 24px;
+}
+
+.saved-prompts-layout {
+  display: grid;
+  grid-template-columns: minmax(140px, 1fr) minmax(0, 3fr);
+  gap: 24px;
+}
+
+.saved-prompt-list {
+  list-style: none;
+  padding: 0;
+  display: grid;
+  gap: 8px;
+
+  button {
+    width: 100%;
+    text-align: left;
+    overflow-wrap: anywhere;
+  }
+
+  [aria-current="true"] { border-color: var(--accent); }
+}
+
+.saved-prompt-editor {
+  display: grid;
+  gap: 10px;
+  min-width: 0;
+
+  input { width: 100%; min-width: 0; }
+  pre { white-space: pre-wrap; overflow-wrap: anywhere; }
+  details { margin-block: 12px; }
+  summary { cursor: pointer; overflow-wrap: anywhere; }
+}
+
+.saved-prompt-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+@media (max-width: 680px) {
+  .saved-prompts-layout { grid-template-columns: minmax(0, 1fr); }
 }
 
 .model-capabilities-dialog::backdrop {
@@ -990,8 +1086,8 @@ button.secondary {
 }
 
 .chat-head .model-meta {
-  margin-left: auto;
-  max-width: min(100%, 460px);
+  margin-top: 6px;
+  max-width: 100%;
 }
 
 .settings-shell {
@@ -1384,32 +1480,6 @@ button.secondary {
     align-items: end;
   }
 
-  // Below the single-row layout's safe width, move the brand above the controls.
-  // The controls keep the same equal-track centering until the mobile stack.
-  .chat-hero {
-    display: flex;
-    flex-direction: column;
-    align-items: stretch;
-  }
-
-  .chat-hero .hero-copy {
-    align-self: stretch;
-  }
-
-  .chat-hero .hero-actions {
-    display: grid;
-    grid-template-columns: minmax(0, 1fr) minmax(420px, 560px) minmax(0, 1fr);
-    width: 100%;
-  }
-
-  .chat-hero .model-control {
-    grid-column: 2;
-  }
-
-  .chat-hero .nav-link {
-    grid-column: 3;
-  }
-
   .hero-meta,
   .hero-actions {
     justify-content: space-between;
@@ -1434,7 +1504,7 @@ button.secondary {
   // viewport or adding a second scrolling region.
   .chat {
     order: -1;
-    height: calc(100svh - 153px);
+    height: calc(100svh - 110px);
     min-height: 480px;
   }
 
@@ -1491,8 +1561,9 @@ button.secondary {
     align-items: stretch;
   }
 
-  .chat-head .model-meta {
-    margin-left: 0;
+  .conversation-model-controls {
+    flex: 0 0 auto;
+    width: 100%;
     max-width: none;
   }
 
@@ -1540,44 +1611,44 @@ button.secondary {
 
 }
 
-// Keep the logo and controls from competing for the same row on narrow tablets.
-// The desktop header needs roughly 640px of usable width once its minimum-size
-// model picker, Settings button, and brand are accounted for.
 @media (max-width: 680px) {
   .hero {
     flex-direction: column;
     align-items: stretch;
   }
 
-  .chat-hero .hero-actions {
+  .model-control { min-width: 0; }
+}
+
+// At phone widths, keep both destinations visible without squeezing model names.
+@media (max-width: 560px) {
+  .chat-hero {
+    grid-template-columns: minmax(0, 1fr);
+    gap: 12px;
+    padding: 14px;
+  }
+
+  .header-navigation {
     display: grid;
     grid-template-columns: minmax(0, 1fr) auto;
-    align-items: end;
   }
 
-  .chat-hero .model-control,
-  .chat-hero .nav-link {
-    grid-column: auto;
+  .header-navigation .nav-link {
+    padding: 10px 12px;
+    font-size: 0.8rem;
   }
 
-  .model-control {
-    min-width: 0;
+  .conversation-model-controls .model-control.has-thinking {
+    grid-template-columns: minmax(0, 1fr) 100px 44px;
   }
+
+  .conversation-model-controls select { padding-inline: 8px; }
+
+  .chat { height: calc(100svh - 165px); }
 
   .model-capabilities-dialog {
     width: calc(100vw - 20px);
     max-height: calc(100svh - 20px);
-  }
-}
-
-@media (max-width: 520px) {
-  .chat-hero .model-control {
-    grid-column: 1 / -1;
-  }
-
-  .chat-hero .nav-link {
-    grid-column: 2;
-    margin-top: 8px;
   }
 }
 

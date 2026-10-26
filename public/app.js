@@ -1372,7 +1372,9 @@ function renderModelMeta() {
   const modelName = el("model").value;
   const info = state.modelInfo.get(modelName);
   const summary = document.createElement("div");
-  summary.className = "model-meta-summary";
+  // The selector now shows the model name in the conversation header. Keep its
+  // description accessible without duplicating those labels; warnings stay visible.
+  summary.className = "model-meta-summary visually-hidden";
 
   if (!modelName) {
     summary.textContent = "No model selected";

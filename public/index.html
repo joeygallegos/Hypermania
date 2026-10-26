@@ -11,29 +11,15 @@
 
 <body>
   <main class="shell">
-    <section class="hero chat-hero">
+    <header class="hero chat-hero">
       <div class="hero-copy">
         <h1 class="brand-logo" data-text="HYPERMANIA" aria-label="Hypermania">HYPERMANIA</h1>
       </div>
-      <div class="hero-actions">
-        <div class="model-control">
-          <label class="model-picker" for="model">
-            <span class="visually-hidden">Active model</span>
-            <select id="model" aria-describedby="modelMeta"></select>
-          </label>
-          <label id="thinkingControl" class="thinking-picker" for="thinkMode" hidden>
-            <span class="visually-hidden">Thinking level</span>
-            <select id="thinkMode" title="Thinking level"></select>
-          </label>
-          <button id="modelCapabilitiesButton" class="secondary model-info-button" type="button"
-            aria-label="Show selected model capabilities" aria-haspopup="dialog"
-            aria-controls="modelCapabilitiesDialog" title="Model capabilities">
-            <span aria-hidden="true">i</span>
-          </button>
-        </div>
+      <nav class="header-navigation" aria-label="Main navigation">
+        <a class="secondary nav-link prompt-library-link" href="/prompts.html" target="_blank" rel="noopener">Manage prompts <span aria-hidden="true">&#8599;</span><span class="visually-hidden">(opens in a new tab)</span></a>
         <a class="secondary nav-link" href="/settings.html">Settings</a>
-      </div>
-    </section>
+      </nav>
+    </header>
 
     <dialog id="modelCapabilitiesDialog" class="model-capabilities-dialog"
       aria-labelledby="modelCapabilitiesTitle" aria-describedby="modelCapabilitiesSummary">
@@ -71,7 +57,24 @@
             <h2 id="activeChatTitle">New chat</h2>
           </div>
           <a class="secondary nav-link mobile-history-link" href="#chatHistoryTitle">Chats</a>
-          <div id="modelMeta" class="model-meta" aria-live="polite" aria-atomic="true"></div>
+          <div class="conversation-model-controls">
+            <div class="model-control">
+              <label class="model-picker" for="model">
+                <span class="section-kicker">Active model</span>
+                <select id="model" aria-describedby="modelMeta"></select>
+              </label>
+              <label id="thinkingControl" class="thinking-picker" for="thinkMode" hidden>
+                <span class="section-kicker">Thinking level</span>
+                <select id="thinkMode" title="Thinking level"></select>
+              </label>
+              <button id="modelCapabilitiesButton" class="secondary model-info-button" type="button"
+                aria-label="Show selected model capabilities" aria-haspopup="dialog"
+                aria-controls="modelCapabilitiesDialog" title="Model capabilities">
+                <span aria-hidden="true">i</span>
+              </button>
+            </div>
+            <div id="modelMeta" class="model-meta" aria-live="polite" aria-atomic="true"></div>
+          </div>
         </div>
         <select id="contextSize" hidden aria-hidden="true">
           <option value="4096">4k</option>

@@ -57,6 +57,28 @@ test("does not pair ordinary currency amounts as math", () => {
   assert.equal(shouldRenderDollarMath(String.raw`55.34 \div 2`), true);
 });
 
+test("keeps currency rates and surrounding prose out of math rendering", () => {
+  const sources = [
+    "It costs $3,500/month here, whereas the same house in a low-tax state might only cost you $2,800/month.",
+    "Compare $3,500/month here, whereas the same house in a low−tax state might only cost you $2,800/month.",
+    "Budget $42,000/year here versus $33,600/year elsewhere.",
+    "Allow $55 per person and $27 per child.",
+    "Compare $55/person with $27/person.",
+  ];
+  for (const source of sources) {
+    assert.deepEqual(splitMathSegments(source), [{ type: "text", value: source }]);
+  }
+});
+
+test("still recognizes division and formulas starting with a number", () => {
+  for (const value of ["55 / 2", "55/2", "55 / x", "55/(x+1)", String.raw`55/\pi`, "55+2", "55x^2"]) {
+    const [segment] = splitMathSegments(`$${value}$`);
+    assert.equal(segment.type, "math", value);
+    assert.equal(segment.value, value);
+    assert.match(katex.renderToString(value, { trust: false }), /katex/);
+  }
+});
+
 test("leaves unmatched delimiters readable", () => {
   const source = String.raw`The model returned $x + 1 without a close.`;
   assert.deepEqual(splitMathSegments(source), [{ type: "text", value: source }]);
