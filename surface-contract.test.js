@@ -57,7 +57,9 @@ test("attachment inventory exposes removable named items and aggregate state", (
   assert.match(app, /name\.textContent = attachment\.name/);
   assert.match(app, /remove\.setAttribute\("aria-label", `Remove \$\{attachment\.name\}`\)/);
   assert.match(app, /collection\.splice\(index, 1\)/);
-  assert.match(app, /`\+ \$\{summary\} attached`/);
+  assert.match(app, /\$\{open \? "Hide" : "Show"\} \$\{summary\} attached/);
+  assert.doesNotMatch(app, /attachment-pdf-badge/);
+  assert.match(scss, /max-height: min\(240px, 30svh\);\s*overflow-y: auto;/);
 });
 
 test("send progress and recovery controls preserve a retryable draft", () => {
@@ -72,7 +74,7 @@ test("send progress and recovery controls preserve a retryable draft", () => {
   assert.match(app, /navigator\.clipboard\.writeText\(referenceId\)/);
   assert.match(app, /Reference ID: \$\{referenceId\}/);
   assert.match(app, /const draftText = el\("prompt"\)\.value;\s+const prompt = draftText\.trim\(\);/);
-  assert.match(app, /const renderedUserMessage = addMessage\([\s\S]*?el\("prompt"\)\.value = "";\s+setBusy\(true/);
+  assert.match(app, /const renderedUserMessage = addMessage\([\s\S]*?el\("prompt"\)\.value = "";\s+setAttachmentTrayOpen\(false\);\s+setBusy\(true/);
   assert.match(app, /catch \(error\) \{[\s\S]*?el\("prompt"\)\.value = draftText;[\s\S]*?endGenerationMonitor\("Request failed\. Your message is ready to retry\."\)/);
   assert.match(app, /Keep raw File objects untouched until persistence succeeds/);
   assert.match(app, /const historyStartIndex = state\.history\.length/);

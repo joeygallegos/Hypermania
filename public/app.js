@@ -547,12 +547,11 @@ function setBusy(isBusy, statusText = "") {
   updateSendState();
   send.textContent = isBusy ? "Waiting..." : state.sendLabel;
 
-  const attachmentToggle = el("attachmentToggle");
   const dropzone = el("dropzone");
   el("model").disabled = isBusy;
   el("thinkMode").disabled = isBusy || el("thinkingControl").hidden;
   el("prompt").disabled = isBusy;
-  attachmentToggle.disabled = isBusy;
+  // Inspection stays available while a request runs; only file mutation locks.
   dropzone.classList.toggle("disabled", isBusy);
   dropzone.setAttribute("aria-disabled", String(isBusy));
   // A late streaming response belongs to the active chat. Lock navigation until
@@ -977,12 +976,6 @@ function renderPreview() {
       image.src = attachment.dataUrl;
       image.alt = "";
       figure.appendChild(image);
-    } else {
-      const badge = document.createElement("div");
-      badge.className = "attachment-pdf-badge";
-      badge.textContent = "PDF";
-      badge.setAttribute("aria-hidden", "true");
-      figure.appendChild(badge);
     }
 
     const caption = document.createElement("figcaption");
@@ -1002,12 +995,16 @@ function renderPreview() {
     remove.disabled = state.requestInProgress;
     remove.addEventListener("click", () => {
       if (state.requestInProgress) return;
+      const removalIndex = Array.from(preview.querySelectorAll(".attachment-remove")).indexOf(remove);
       const collection = kind === "Image" ? state.images : state.pdfs;
       collection.splice(index, 1);
       renderPreview();
       setDropLabel();
       updateSendState();
       renderModelMeta();
+      // Rebuilding removes the clicked control; preserve a useful focus target.
+      const remaining = preview.querySelectorAll(".attachment-remove");
+      (remaining[Math.min(removalIndex, remaining.length - 1)] || el("attachmentToggle")).focus();
     });
     caption.append(kindLabel, name, remove);
     figure.appendChild(caption);
@@ -1033,17 +1030,22 @@ function setDropLabel() {
   el("dropHint").textContent = summary
     ? state.pdfs.length ? "PDF pages will be prepared when you send." : "Ready to send with your next prompt."
     : "PNG, JPG, WEBP, GIF, PDF (up to 32 pages)";
+  const open = !el("attachmentTray").hidden;
   el("attachmentToggle").textContent = summary
-    ? `+ ${summary} attached`
-    : "+ Add images or PDF";
+    ? `${open ? "Hide" : "Show"} ${summary} attached`
+    : `${open ? "Hide" : "+ Add"} images or PDF`;
   updateSendState();
 }
 
 function setAttachmentTrayOpen(open) {
   const tray = el("attachmentTray");
   const toggle = el("attachmentToggle");
+  // Auto-collapse may follow file selection with focus still inside the tray.
+  // Move it before hiding so keyboard focus never stays in hidden content.
+  if (!open && tray.contains(document.activeElement)) toggle.focus();
   tray.hidden = !open;
   toggle.setAttribute("aria-expanded", String(open));
+  setDropLabel();
 }
 
 function isGptOssModel(modelName, info) {
@@ -1630,6 +1632,7 @@ async function renderPdf(pdf, attachmentIndex, attachmentCount) {
 }
 
 async function ingestFiles(fileList, { append = true, pasted = false } = {}) {
+  if (state.requestInProgress) return;
   const files = Array.from(fileList).filter((file) => file.type.startsWith("image/") || isPdf(file));
   if (!files.length) return;
 
@@ -1651,6 +1654,9 @@ async function ingestFiles(fileList, { append = true, pasted = false } = {}) {
       });
     }
 
+    // Image reads can finish after Send locks the composer; discard that late
+    // selection rather than changing the attachment snapshot being processed.
+    if (state.requestInProgress) return;
     const nextPdfCount = append ? state.pdfs.length + pdfs.length : pdfs.length;
     if (state.documents.length + nextPdfCount > MAX_CONVERSATION_DOCUMENTS) {
       throw new Error(`A conversation can contain up to ${MAX_CONVERSATION_DOCUMENTS} PDFs. Start a new chat to attach more.`);
@@ -1660,7 +1666,7 @@ async function ingestFiles(fileList, { append = true, pasted = false } = {}) {
     state.pdfs = append ? [...state.pdfs, ...pdfs] : pdfs;
     renderPreview();
     setDropLabel();
-    setAttachmentTrayOpen(true);
+    setAttachmentTrayOpen(false);
     renderModelMeta();
     if (pasted) {
       setStatus(`Added ${uploaded.length} pasted image${uploaded.length === 1 ? "" : "s"}.`);
@@ -2041,6 +2047,7 @@ async function sendChat() {
   // The bubble becomes the visible owner of the submitted text while the
   // locked composer stays empty. The catch path restores this exact draft.
   el("prompt").value = "";
+  setAttachmentTrayOpen(false);
   setBusy(true, pendingPdfs.length ? pdfPreparationStatus(pendingPdfs[0], 1, pendingPdfs.length) : "Waiting for Ollama…");
   let assistant = null;
 
@@ -2192,7 +2199,6 @@ function attachFileHandling() {
   const dropzone = el("dropzone");
 
   el("attachmentToggle").addEventListener("click", () => {
-    if (state.requestInProgress) return;
     setAttachmentTrayOpen(el("attachmentTray").hidden);
   });
 
