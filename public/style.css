@@ -1432,8 +1432,8 @@ button.secondary {
   color: var(--muted-2);
 }
 
-.final-answer-bubble.is-pending .final-answer-text:empty::before {
-  content: none;
+.final-answer-bubble.is-pending .final-answer-text:empty {
+  display: none;
 }
 
 .final-answer-bubble .wait-indicator {
