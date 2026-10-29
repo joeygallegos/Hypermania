@@ -63,9 +63,9 @@ test("attachment inventory exposes removable named items and aggregate state", (
 test("send progress and recovery controls preserve a retryable draft", () => {
   assert.match(app, /function hasDraft\(\)[\s\S]*?prompt[\s\S]*?state\.images\.length[\s\S]*?state\.pdfs\.length/);
   assert.match(app, /el\("send"\)\.disabled = state\.requestInProgress \|\| !hasDraft\(\)/);
-  assert.match(app, /Preparing PDF \$\{index \+ 1\} of \$\{pendingPdfs\.length\}…/);
-  assert.match(app, /setBusy\(true, "Waiting for model…"\)/);
-  assert.match(app, /setBusy\(true, "Receiving response…"\)/);
+  assert.match(app, /pdfPreparationStatus\(pdf, index \+ 1, pendingPdfs\.length\)/);
+  assert.match(app, /setBusy\(true, "Waiting for Ollama…"\)/);
+  assert.match(app, /"Receiving reasoning…" : "Generating answer…"/);
   assert.match(app, /setBusy\(true, "Saving chat\.\.\."\)/);
   assert.match(app, /retry\.textContent = "Retry request"/);
   assert.match(app, /copy\.textContent = "Copy reference"/);

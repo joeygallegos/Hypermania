@@ -24,6 +24,7 @@ const state = {
   generationActive: false,
   generationLastChunkAt: 0,
   generationPingFailures: 0,
+  generationSession: null,
   requestInProgress: false,
 };
 
@@ -1200,64 +1201,105 @@ async function polishFinalAnswer(model, messages, thinking, promptText) {
   return result;
 }
 
+function pdfPreparationStatus(pdf, index, count) {
+  return `Preparing ${pdf.name} (${index} of ${count})…`;
+}
+
+function formatGenerationElapsed(seconds) {
+  const hours = Math.floor(seconds / 3600);
+  const minutes = Math.floor((seconds % 3600) / 60);
+  const remainder = seconds % 60;
+  return hours ? `${hours}h${minutes}m${remainder}s`
+    : minutes ? `${minutes}m${remainder}s` : `${remainder}s`;
+}
+
+function renderGenerationStatus() {
+  const session = state.generationSession;
+  if (!session || session.reconnecting) return;
+  const seconds = Math.max(1, Math.round((Date.now() - state.generationLastChunkAt) / 1000));
+  const elapsed = formatGenerationElapsed(seconds);
+  if (state.generationPingFailures >= 2) {
+    setBusy(true, `Cannot reach Ollama — no new model output for ${elapsed}`);
+  } else if (Date.now() - state.generationLastChunkAt >= 8000) {
+    setBusy(true, session.phase === "waiting"
+      ? `Waiting for Ollama — no model output yet (${elapsed})`
+      : `Waiting for more ${session.phase === "thinking" ? "reasoning" : "answer text"} — no new output for ${elapsed}`);
+  } else {
+    setBusy(true, session.phase === "waiting" ? "Waiting for Ollama…"
+      : session.phase === "thinking" ? "Receiving reasoning…" : "Generating answer…");
+  }
+}
+
 function beginGenerationMonitor() {
+  stopGenerationMonitor();
+  // Identity guards prevent a slow health check from updating a later send.
+  const session = { phase: "waiting", reconnecting: false, pinging: false };
+  state.generationSession = session;
   state.generationActive = true;
   state.generationLastChunkAt = Date.now();
   state.generationPingFailures = 0;
 
-  if (state.generationTimer) {
-    clearInterval(state.generationTimer);
-  }
-
   state.generationTimer = setInterval(async () => {
-    if (!state.generationActive) return;
+    if (state.generationSession !== session) return;
 
     const idleMs = Date.now() - state.generationLastChunkAt;
     const idleSeconds = Math.max(1, Math.round(idleMs / 1000));
 
     if (idleMs >= 8000) {
-      setBusy(true, `Still working… (${idleSeconds}s since last update)`);
       debugLog("generation_idle", {
         requestId: state.activeRequestId,
         idleSeconds,
       });
     }
 
+    renderGenerationStatus();
+    // Do not accumulate overlapping health checks when the endpoint is slow.
+    if (session.pinging) return;
+    session.pinging = true;
     try {
       const res = await fetch("/api/ollama/tags", { cache: "no-store" });
-      if (!state.generationActive) return;
+      if (state.generationSession !== session) return;
       if (!res.ok) {
         throw new Error(`HTTP ${res.status}`);
       }
       state.generationPingFailures = 0;
     } catch {
-      if (!state.generationActive) return;
+      if (state.generationSession !== session) return;
       state.generationPingFailures += 1;
       debugLog("ollama_ping_failed", {
         requestId: state.activeRequestId,
         idleSeconds,
         failures: state.generationPingFailures,
       });
-      if (state.generationPingFailures >= 2) {
-        setBusy(true, `Checking Ollama… no response yet (${idleSeconds}s idle)`);
-      }
+    } finally {
+      session.pinging = false;
+      if (state.generationSession === session) renderGenerationStatus();
     }
   }, 5000);
 }
 
 function touchGeneration(phase) {
+  if (!state.generationSession) return;
   state.generationLastChunkAt = Date.now();
   if (phase === "thinking" || phase === "answer") {
-    setBusy(true, "Receiving response…");
+    state.generationSession.phase = phase;
+    // Actual model output is stronger evidence of activity than a failed ping.
+    state.generationPingFailures = 0;
+    renderGenerationStatus();
   }
 }
 
-function endGenerationMonitor(statusText = "Done.") {
+function stopGenerationMonitor() {
   state.generationActive = false;
+  state.generationSession = null;
   if (state.generationTimer) {
     clearInterval(state.generationTimer);
     state.generationTimer = null;
   }
+}
+
+function endGenerationMonitor(statusText = "Done.") {
+  stopGenerationMonitor();
   setBusy(false, statusText);
 }
 
@@ -1688,7 +1730,7 @@ function imageSupportHint(modelName) {
 
 async function streamChat(model, messages, thinkValue, documentContext = {}) {
   const requestBody = buildRequestBody(model, messages, thinkValue, true, documentContext);
-  setBusy(true, "Waiting for model…");
+  setBusy(true, "Waiting for Ollama…");
   const startResponse = await fetch("/api/chat/jobs", {
     method: "POST",
     headers: traceHeaders(),
@@ -1844,6 +1886,10 @@ async function streamChat(model, messages, thinkValue, documentContext = {}) {
       }
       update = await response.json();
       visibleDisconnectedAt = 0;
+      if (state.generationSession) {
+        state.generationSession.reconnecting = false;
+        renderGenerationStatus();
+      }
     } catch (error) {
       if (error.retryable === false) throw error;
       if (document.hidden) {
@@ -1858,6 +1904,8 @@ async function streamChat(model, messages, thinkValue, documentContext = {}) {
       if (retryExpired) {
         throw new Error("Could not reconnect to the in-progress response.");
       }
+      // Keep the idle timer from replacing the connection recovery message.
+      if (state.generationSession) state.generationSession.reconnecting = true;
       setBusy(true, document.hidden ? "Response continues in the background…" : "Reconnecting to response…");
       await waitForNextPoll();
       continue;
@@ -1993,7 +2041,7 @@ async function sendChat() {
   // The bubble becomes the visible owner of the submitted text while the
   // locked composer stays empty. The catch path restores this exact draft.
   el("prompt").value = "";
-  setBusy(true, pendingPdfs.length ? `Preparing PDF 1 of ${pendingPdfs.length}…` : "Waiting for model…");
+  setBusy(true, pendingPdfs.length ? pdfPreparationStatus(pendingPdfs[0], 1, pendingPdfs.length) : "Waiting for Ollama…");
   let assistant = null;
 
   try {
@@ -2007,7 +2055,7 @@ async function sendChat() {
     const currentDocuments = [];
     if (pendingPdfs.length) {
       for (const [index, pdf] of pendingPdfs.entries()) {
-        setBusy(true, `Preparing PDF ${index + 1} of ${pendingPdfs.length}…`);
+        setBusy(true, pdfPreparationStatus(pdf, index + 1, pendingPdfs.length));
         if (!pdf.artifact) {
           pdf.artifact = await renderPdf(pdf, index + 1, pendingPdfs.length);
         }
@@ -2036,7 +2084,7 @@ async function sendChat() {
     // attempt can then reuse them alongside the restored text draft.
 
     beginGenerationMonitor();
-    setBusy(true, "Waiting for model…");
+    renderGenerationStatus();
 
     const documentContext = {
       mode: "context",
@@ -2045,6 +2093,8 @@ async function sendChat() {
       includeImages: supportsVision(info, model),
     };
     let { content: reply, thinking } = await streamChat(model, state.history, thinkValue, documentContext);
+    // Streaming is over. Fallback and persistence own their status from here.
+    stopGenerationMonitor();
     if (!reply) {
       debugLog("stream_without_final_answer", {
         requestId,
