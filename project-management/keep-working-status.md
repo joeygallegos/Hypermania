@@ -1,0 +1,24 @@
+# Keep working — status
+
+- Discovery: Complete. Role, Objective, Details, Examples, and Sense check confirmed on 2026-10-29. User refinement requires retaining the active attempt while Ollama continues and recovering temporary disconnection.
+- Plan and functional requirements: Approved on 2026-10-29: “Approve—implement the plan”. Root attachment plan and requirements preserved.
+- T-01 backend lifecycle: Complete; implementation accepted against assigned requirements after focused verification and comment pass.
+- T-02 frontend lifecycle/preferences/docs: Complete; implementation accepted against assigned requirements after focused/full verification and comment pass.
+- T-03 management/evidence: Complete; scoped implementation and verification evidence accepted against approved plan/requirements.
+- T-04 independent consultant gate: PASS. Fresh third independent report preserved verbatim in keep-working-independent-review-3.md, with all ten FRs mapped and no findings/remediation. First two conditional reports remain unchanged in review-1/review-2 artifacts; every finding remediated before PASS.
+- Verification restriction: Mock-only. No GPU inference or real PDF uploads.
+- Existing work: Preserve modified README/frontend/styles/surface tests and untracked attachment records/tests.
+- Approved boundary: Page reload/tab closure restoration is outside this focused plan; temporary network/background recovery in the existing page is included, and server retains existing in-memory job results.
+- Deviations: No dependency changes. Task-specific planning documents used to preserve completed attachment history.
+- Contract decision: optional keepWorking and per-stage UUID jobId application fields; omitted policy preserves legacy limit; repeated creation returns same job; conflicting reuse rejected; application fields stripped before Ollama. Cancel POST returns status/requestId and GET returns full authoritative update.
+- Repository observation: prior attachment changes became clean externally during this session; no worker or manager reset or reverted them.
+- Backend focused tests: 35/35 passed after final comment/race pass; server syntax check passed.
+- Browser QA: parent completed isolated headless Edge desktop/mobile checks with static assets and all API routes mocked; passed. Exact evidence in keep-working-verification.md.
+- Combined manager verification after final edits: npm test 114/114 passed; git diff --check passed with only LF/CRLF notices. Worker style compilation and frontend syntax checks passed.
+- Final browser rerun after all frontend edits passed both sizes, including explicit restored-prompt focus assertion; raw screenshots refreshed.
+- FR-006 remediation: lifecycle errors use allowlisted classifications and numeric HTTP status, without upstream bodies or arbitrary exception text. Private-text sentinel regressions pass; backend focused tests now 37/37.
+- FR-007 remediation: visible neutral responseNotice above draft after confirmed Stop, cleared at next send. Live status retained; focused behavior assertions and final desktop/mobile QA pass.
+- Post-remediation full suite: 116/116 passed after comment pass; style build/syntax/whitespace checks passed. No long real-time tests; elapsed minutes/hours simulated.
+- Second review remediation complete: normal/trailing streaming errors use fixed diagnostics; send_error logs fixed request_failed reason even for arbitrary thrown messages. Actual client-log payload sentinel regressions added. Visible active status survives first token/followup; successful recovery resets independently of monitor. Code/comment pass, syntax/style build and 118/118 full tests passed.
+- Final parent outage QA passed desktop/mobile in ~6 seconds: post-token visible reconnect, offline keyboard Stop pending visibly/busy, restored connection confirms cancellation and exact draft/focus/stopped notice, next send replaces notice; no errors/overflow. Pending-stop screenshots added. Third fresh review is sole remaining gate.
+- Final gate completed: reviewer independently ran 88 quick tests and syntax checks, inspected all six screenshots/source/integration tests, and returned PASS. No open issues within approved scope. No required remediation.

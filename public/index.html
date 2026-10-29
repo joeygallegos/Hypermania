@@ -102,6 +102,7 @@
             </div>
             <div id="preview" class="preview"></div>
           </div>
+          <p id="responseNotice" class="response-notice" hidden></p>
           <label class="composer-field">
             <span class="visually-hidden">Message</span>
             <textarea id="prompt" rows="4"
@@ -111,6 +112,10 @@
           <div class="composer-actions">
             <button id="attachmentToggle" type="button" class="secondary attachment-toggle" aria-expanded="false"
               aria-controls="attachmentTray">+ Add images or PDF</button>
+            <label class="keep-working-control" title="Continue until the response finishes or you press Stop. Turn off for a 30-minute limit.">
+              <input id="keepWorking" type="checkbox" checked /> Keep working
+            </label>
+            <button id="stopResponse" class="secondary" type="button" hidden>Stop</button>
             <button id="send" type="button">Send to Ollama</button>
           </div>
         </div>

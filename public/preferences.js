@@ -3,6 +3,7 @@ const HYPERMANIA_PREFERENCES = {
   thinkMode: "hypermania.thinkMode",
   contextSize: "hypermania.contextSize",
   systemInstruction: "hypermania.systemInstruction",
+  keepWorking: "hypermania.keepWorking",
 };
 
 const DEFAULT_SYSTEM_INSTRUCTION = "Always respond in English unless the user asks for another language.";
@@ -35,6 +36,8 @@ function readOptionalPreference(key, fallback) {
 }
 
 window.hypermaniaPreferences = {
+  getKeepWorking: () => readPreference(HYPERMANIA_PREFERENCES.keepWorking, "true") !== "false",
+  setKeepWorking: (value) => writePreference(HYPERMANIA_PREFERENCES.keepWorking, Boolean(value)),
   getModel: () => readPreference(HYPERMANIA_PREFERENCES.model, ""),
   setModel: (value) => writePreference(HYPERMANIA_PREFERENCES.model, value),
   getThinkMode: () => readPreference(HYPERMANIA_PREFERENCES.thinkMode, "auto"),

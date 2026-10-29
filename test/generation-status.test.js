@@ -18,7 +18,7 @@ function harness() {
     Date: { now: () => now },
     setInterval: (callback) => { interval = callback; return 1; },
     clearInterval: () => { interval = null; },
-    setBusy: (_, label) => labels.push(label),
+    setBusy: (_, label) => { if (label) labels.push(label); },
     debugLog() {},
     fetch: async () => ({ ok: true }),
   };
@@ -154,6 +154,7 @@ test("real stream polling handles empty polls, reasoning, reconnect, and answer 
     JSON.stringify({ message: { content: "answer" } })];
   Object.assign(h.context, {
     buildRequestBody: () => ({}), traceHeaders: () => ({}),
+    makeConversationId: () => "test-stage",
     CHAT_JOB_HIDDEN_POLL_MS: 2000, CHAT_JOB_POLL_MS: 400,
     CHAT_JOB_FETCH_TIMEOUT_MS: 15000, CHAT_JOB_VISIBLE_RETRY_MS: 30000,
     AbortController, cleanThinkingText: (text) => text,

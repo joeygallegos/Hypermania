@@ -3,7 +3,7 @@ const https = require("https");
 const fs = require("fs");
 const os = require("os");
 const path = require("path");
-const { randomUUID } = require("crypto");
+const { randomUUID, createHash } = require("crypto");
 const { execFile } = require("child_process");
 const { promisify } = require("util");
 const { Readable } = require("stream");
@@ -710,7 +710,9 @@ function appendChatJobData(job, text)
   if (!text) return;
   if (job.data.length + text.length > MAX_CHAT_JOB_CHARS)
   {
-    throw new Error("The model response exceeded the recoverable response limit.");
+    const error = new Error("The model response exceeded the recoverable response limit.");
+    error.code = "CHAT_RESPONSE_LIMIT";
+    throw error;
   }
   // Offsets use JavaScript string positions end-to-end. This keeps UTF-8 chunks
   // safe even when Ollama splits a multibyte character across network reads.
@@ -759,19 +761,32 @@ async function runChatJob(job, body)
   // the Ollama stream here lets clients reconnect without starting a second
   // generation or losing chunks produced while the tab was in the background.
   let reader;
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), MAX_CHAT_JOB_RUNTIME_MS);
+  let failure = "transport_error";
+  const controller = job.controller;
+  // Keep-working jobs have no generation deadline. Short polling requests and
+  // retention limits remain independent of how long Ollama needs to generate.
+  const timeout = job.keepWorking ? null : setTimeout(() =>
+  {
+    if (job.status !== "running") return;
+    job.timedOut = true;
+    controller.abort();
+  }, MAX_CHAT_JOB_RUNTIME_MS);
   try
   {
+    if (job.status === "canceled") return;
     const response = await requestOllama("/api/chat", body, controller.signal);
 
     if (!response.ok)
     {
-      const details = await response.text();
-      throw new Error(details || `Ollama returned HTTP ${response.status}.`);
+      // An upstream error body can echo private prompts, filenames, or answers.
+      // Record only its numeric status; the catch path closes the unread body.
+      job.upstreamStatus = response.status;
+      failure = "upstream_http_error";
+      throw new Error("Ollama returned an unsuccessful HTTP status.");
     }
     if (!response.body)
     {
+      failure = "upstream_empty_response";
       throw new Error("Ollama returned an empty response.");
     }
 
@@ -780,6 +795,12 @@ async function runChatJob(job, body)
     while (true)
     {
       const { done, value } = await reader.read();
+      // A canceled read may settle with buffered data instead of rejecting.
+      // Never publish those bytes or overwrite the authoritative terminal state.
+      if (job.status === "canceled") return;
+      // Abort can race a buffered read or EOF without making that read reject.
+      // The limited-mode deadline must still win over a later successful read.
+      controller.signal.throwIfAborted();
       if (done) break;
       const text = decoder.decode(value, { stream: true });
       appendChatJobData(job, text);
@@ -791,16 +812,26 @@ async function runChatJob(job, body)
     job.status = "complete";
   } catch (error)
   {
-    job.status = "failed";
-    job.error = error.name === "AbortError"
-      ? "The model request exceeded the 30-minute response limit."
-      : "The model request failed. Check the server log and try again.";
-    job.errorDetails = errorDiagnostic(error);
+    if (job.status !== "canceled")
+    {
+      job.status = "failed";
+      job.error = job.timedOut
+        ? "The model request exceeded the 30-minute response limit."
+        : "The model request failed. Check the server log and try again.";
+      // Lifecycle diagnostics are an allowlist, never upstream error text.
+      // Even transport exceptions are untrusted and may include response data.
+      job.errorDetails = job.timedOut ? "generation_timeout"
+        : error.code === "CHAT_RESPONSE_LIMIT" ? "response_limit" : failure;
+    }
+    // A resource-limit or upstream failure must also terminate the individual
+    // transport so Ollama is not left producing an uncollectable response.
+    controller.abort();
     if (reader) await reader.cancel().catch(() => { });
   } finally
   {
     clearTimeout(timeout);
     if (reader) reader.releaseLock();
+    job.controller = null;
     job.updatedAt = Date.now();
     await appendLogSafely({
       source: "chat_job",
@@ -812,6 +843,7 @@ async function runChatJob(job, body)
       chars: job.data.length,
       ...job.telemetry,
       error: job.errorDetails || undefined,
+      upstreamStatus: job.upstreamStatus,
     });
   }
 }
@@ -820,7 +852,7 @@ async function handleChatJobs(req, res)
 {
   const trace = getTraceContext(req);
   const requestUrl = new URL(req.url, "http://localhost");
-  pruneChatJobs(req.method === "POST" && requestUrl.pathname === "/api/chat/jobs");
+  pruneChatJobs();
 
   if (requestUrl.pathname === "/api/chat/jobs")
   {
@@ -829,13 +861,6 @@ async function handleChatJobs(req, res)
       sendJson(res, 405, { error: "Method not allowed" });
       return;
     }
-    if (chatJobs.size >= MAX_CHAT_JOBS)
-    {
-      await appendLogSafely({ source: "chat_job", event: "rejected", ...trace, status: 503, reason: "capacity" });
-      sendError(res, 503, "Too many responses are being retained. Try again later.", trace.requestId);
-      return;
-    }
-
     const body = await readBody(req);
     let payload;
     try
@@ -854,10 +879,50 @@ async function handleChatJobs(req, res)
       return;
     }
 
+    if ((payload.keepWorking !== undefined && typeof payload.keepWorking !== "boolean")
+      || (payload.jobId !== undefined && (typeof payload.jobId !== "string" || !TRACE_ID_PATTERN.test(payload.jobId))))
+    {
+      sendError(res, 400, "Invalid chat job options.", trace.requestId);
+      return;
+    }
+
+    const keepWorking = payload.keepWorking === true;
+    const id = payload.jobId?.toLowerCase() || randomUUID();
+    delete payload.keepWorking;
+    delete payload.jobId;
     payload.stream = true;
+    const modelBody = Buffer.from(JSON.stringify(payload));
+    // Store a fixed-size identity, not another copy of a potentially large PDF
+    // prompt. A retry may recover an acknowledged-or-lost creation safely.
+    const fingerprint = createHash("sha256").update(modelBody).update(String(keepWorking)).digest("hex");
+    const existing = chatJobs.get(id);
+    if (existing)
+    {
+      if (existing.fingerprint !== fingerprint)
+      {
+        sendError(res, 409, "This response ID belongs to a different request.", trace.requestId);
+        return;
+      }
+      sendJson(res, 202, { id: existing.id, requestId: existing.requestId });
+      return;
+    }
+    // Recover an existing job before reserving capacity: a retry must never
+    // evict its own completed result or be rejected because all slots are busy.
+    pruneChatJobs(true);
+    if (chatJobs.size >= MAX_CHAT_JOBS)
+    {
+      await appendLogSafely({ source: "chat_job", event: "rejected", ...trace, status: 503, reason: "capacity" });
+      sendError(res, 503, "Too many responses are being retained. Try again later.", trace.requestId);
+      return;
+    }
     const job = {
-      id: randomUUID(),
+      id,
       ...trace,
+      keepWorking,
+      fingerprint,
+      // Install the handle before logging/acknowledgment yields, so an early
+      // Stop cannot race the runner and leave a newly started request orphaned.
+      controller: new AbortController(),
       status: "running",
       data: "",
       error: "",
@@ -868,26 +933,40 @@ async function handleChatJobs(req, res)
     chatJobs.set(job.id, job);
     await appendLogSafely({ source: "chat_job", event: "started", ...trace, jobId: job.id });
     sendJson(res, 202, { id: job.id, requestId: trace.requestId });
-    runChatJob(job, Buffer.from(JSON.stringify(payload))).catch(() => { });
+    runChatJob(job, modelBody).catch(() => { });
     return;
   }
 
-  const match = requestUrl.pathname.match(/^\/api\/chat\/jobs\/([a-f0-9-]{36})$/i);
+  const match = requestUrl.pathname.match(/^\/api\/chat\/jobs\/([a-f0-9-]{36})(\/cancel)?$/i);
   if (!match)
   {
     sendJson(res, 404, { error: "Chat response not found." });
     return;
   }
-  if (req.method !== "GET")
+  if (req.method !== (match[2] ? "POST" : "GET"))
   {
     sendJson(res, 405, { error: "Method not allowed" });
     return;
   }
 
-  const job = chatJobs.get(match[1]);
+  const job = chatJobs.get(match[1].toLowerCase());
   if (!job)
   {
     sendJson(res, 404, { error: "This response is no longer available." });
+    return;
+  }
+
+  if (match[2])
+  {
+    if (job.status === "running")
+    {
+      // Publish cancellation synchronously before abort settles any pending
+      // read. Repeated Stop and completion races then have one terminal owner.
+      job.status = "canceled";
+      job.updatedAt = Date.now();
+      job.controller?.abort();
+    }
+    sendJson(res, 200, { status: job.status, requestId: job.requestId });
     return;
   }
 

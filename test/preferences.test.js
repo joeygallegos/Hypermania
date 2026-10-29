@@ -38,3 +38,20 @@ test("system instruction persists custom and intentionally blank values", () => 
   preferences.setSystemInstruction("");
   assert.equal(preferences.getSystemInstruction(), "");
 });
+
+test("Keep working defaults on, remembers both choices, and tolerates unavailable storage", () => {
+  const { preferences, entries } = loadPreferences();
+  assert.equal(preferences.getKeepWorking(), true);
+  preferences.setKeepWorking(false);
+  assert.equal(entries.get("hypermania.keepWorking"), "false");
+  assert.equal(loadPreferences(Object.fromEntries(entries)).preferences.getKeepWorking(), false);
+  preferences.setKeepWorking(true);
+  assert.equal(loadPreferences(Object.fromEntries(entries)).preferences.getKeepWorking(), true);
+  const context = { window: {}, localStorage: {
+    getItem() { throw new Error("unavailable"); },
+    setItem() { throw new Error("unavailable"); },
+  } };
+  vm.runInNewContext(source, context);
+  assert.equal(context.window.hypermaniaPreferences.getKeepWorking(), true);
+  assert.doesNotThrow(() => context.window.hypermaniaPreferences.setKeepWorking(false));
+});

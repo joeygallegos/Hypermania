@@ -26,6 +26,11 @@ const state = {
   generationPingFailures: 0,
   generationSession: null,
   requestInProgress: false,
+  activeJobId: null,
+  activeKeepWorking: true,
+  stopRequested: false,
+  wakeChatPoll: null,
+  responseNoticeIsProgress: false,
 };
 
 const el = (id) => document.getElementById(id);
@@ -48,7 +53,6 @@ const MAX_CONVERSATION_DOCUMENTS = 16;
 const CHAT_JOB_POLL_MS = 400;
 const CHAT_JOB_HIDDEN_POLL_MS = 2000;
 const CHAT_JOB_FETCH_TIMEOUT_MS = 15000;
-const CHAT_JOB_VISIBLE_RETRY_MS = 30000;
 let chatDbPromise;
 
 function debugLog(event, details = {}) {
@@ -543,9 +547,26 @@ function setBusy(isBusy, statusText = "") {
     }
   }
 
+  const notice = el("responseNotice");
+  if (state.activeJobId && statusText) {
+    // After the first answer token the waiting bubble is removed. Keep model
+    // lifecycle status visible beside the draft throughout reconnect and Stop.
+    notice.textContent = statusText;
+    notice.hidden = false;
+    state.responseNoticeIsProgress = true;
+  } else if (!state.activeJobId && state.responseNoticeIsProgress) {
+    notice.hidden = true;
+    notice.textContent = "";
+    state.responseNoticeIsProgress = false;
+  }
+
   const send = el("send");
   updateSendState();
   send.textContent = isBusy ? "Waiting..." : state.sendLabel;
+  el("keepWorking").disabled = isBusy;
+  el("stopResponse").hidden = !state.activeJobId;
+  el("stopResponse").disabled = state.stopRequested;
+  el("stopResponse").textContent = state.stopRequested ? "Stopping…" : "Stop";
 
   const dropzone = el("dropzone");
   el("model").disabled = isBusy;
@@ -1734,57 +1755,123 @@ function imageSupportHint(modelName) {
   return `Install a vision model such as gemma3, llama4, qwen2.5-vl, or another multimodal Ollama model, then refresh the model list.`;
 }
 
-async function streamChat(model, messages, thinkValue, documentContext = {}) {
+function requestResponseStop() {
+  if (!state.activeJobId || state.stopRequested) return;
+  state.stopRequested = true;
+  if (state.generationSession) state.generationSession.reconnecting = true;
+  setBusy(true, "Stopping response…");
+  state.wakeChatPoll?.();
+}
+
+async function streamChat(model, messages, thinkValue, documentContext = {}, renderOutput = true) {
   const requestBody = buildRequestBody(model, messages, thinkValue, true, documentContext);
-  setBusy(true, "Waiting for Ollama…");
-  const startResponse = await fetch("/api/chat/jobs", {
-    method: "POST",
-    headers: traceHeaders(),
-    body: JSON.stringify(requestBody),
-  });
+  // A stage keeps its ID even if its creation acknowledgment is lost. Retrying
+  // this exact request can recover the retained job without duplicate inference.
+  requestBody.jobId = makeConversationId();
+  requestBody.keepWorking = state.activeKeepWorking;
+  const serializedBody = JSON.stringify(requestBody);
+  state.activeJobId = requestBody.jobId;
+  if (renderOutput) setBusy(true, "Waiting for Ollama…");
+  else setBusy(true);
+  try {
+    let started;
+    while (!started) {
+      try {
+        started = await fetchJobUpdate("/api/chat/jobs", {
+          method: "POST", headers: traceHeaders(), body: serializedBody,
+        });
+      } catch (error) {
+        if (error.retryable === false) throw error;
+        showReconnecting();
+        await waitForNextPoll();
+      }
+    }
+    const { id: jobId } = started;
+    if (!jobId) throw new Error("Hypermania did not return a response ID.");
 
-  if (!startResponse.ok) {
-    const body = await startResponse.text();
-    throw apiResponseError(body, "The model request could not be started.", startResponse.status);
-  }
-  const { id: jobId } = await startResponse.json();
-  if (!jobId) throw new Error("Hypermania did not return a response ID.");
+    debugLog("stream_started", {
+      requestId: state.activeRequestId,
+      jobId,
+      model,
+      thinkValue: thinkValue === undefined ? "default" : String(thinkValue),
+    });
 
-  debugLog("stream_started", {
-    requestId: state.activeRequestId,
-    jobId,
-    model,
-    thinkValue: thinkValue === undefined ? "default" : String(thinkValue),
-  });
+    let buffer = "";
+    let full = "";
+    let thinkingFull = "";
+    let sawFirstChunk = false;
+    // Reasoning can arrive one token per chunk; record the phase transition once
+    // instead of producing a diagnostic log entry for every token.
+    let reportedThinkingStart = false;
+    let offset = 0;
 
-  let buffer = "";
-  let full = "";
-  let thinkingFull = "";
-  let sawFirstChunk = false;
-  // Reasoning can arrive one token per chunk; record the phase transition once
-  // instead of producing a diagnostic log entry for every token.
-  let reportedThinkingStart = false;
-  let offset = 0;
-  let visibleDisconnectedAt = 0;
-
-  function consumeBufferedLines(includeTrailing = false) {
-    let newlineIndex = buffer.indexOf("\n");
-    while (newlineIndex !== -1) {
-      const line = buffer.slice(0, newlineIndex).trim();
-      buffer = buffer.slice(newlineIndex + 1);
-      if (line) {
-        let chunk;
-        try {
-          chunk = JSON.parse(line);
-        } catch {
-          // ignore malformed partial chunks
-          chunk = null;
-        }
-        if (chunk) {
-          if (chunk.error) {
-            throw publicError("The model request failed.", extractErrorDetails(chunk.error));
+    function consumeBufferedLines(includeTrailing = false) {
+      let newlineIndex = buffer.indexOf("\n");
+      while (newlineIndex !== -1) {
+        const line = buffer.slice(0, newlineIndex).trim();
+        buffer = buffer.slice(newlineIndex + 1);
+        if (line) {
+          let chunk;
+          try {
+            chunk = JSON.parse(line);
+          } catch {
+            // ignore malformed partial chunks
+            chunk = null;
           }
-          if (chunk.message?.thinking) {
+          if (chunk) {
+            if (chunk.error) {
+              throw publicError("The model request failed.", "Ollama reported a generation error.");
+            }
+            if (chunk.message?.thinking) {
+              thinkingFull += chunk.message.thinking;
+              touchGeneration("thinking");
+              if (!reportedThinkingStart) {
+                reportedThinkingStart = true;
+                debugLog("stream_thinking_seen", {
+                  requestId: state.activeRequestId,
+                  chars: thinkingFull.length,
+                });
+              }
+            }
+            if (chunk.message?.content) {
+              const isFirstAnswerChunk = !sawFirstChunk;
+              if (renderOutput && !sawFirstChunk && state.assistantWait) {
+                state.assistantWait.remove();
+                state.assistantWait = null;
+                state.assistantWaitLabel = null;
+                state.assistantPendingBubble?.classList.remove("is-pending");
+              }
+              sawFirstChunk = true;
+              full += chunk.message.content;
+              if (renderOutput && state.assistantPre) {
+                setAssistantAnswerText(state.assistantPre, full);
+              }
+              touchGeneration("answer");
+              if (isFirstAnswerChunk) {
+                debugLog("stream_answer_seen", {
+                  requestId: state.activeRequestId,
+                  chars: full.length,
+                });
+              }
+            }
+          }
+        }
+        newlineIndex = buffer.indexOf("\n");
+      }
+
+      if (includeTrailing) {
+        const trailing = buffer.trim();
+        buffer = "";
+        if (trailing) {
+          let chunk;
+          try {
+            chunk = JSON.parse(trailing);
+          } catch {
+            chunk = null;
+          }
+
+          if (chunk?.error) throw publicError("The model request failed.", "Ollama reported a generation error.");
+          if (chunk?.message?.thinking) {
             thinkingFull += chunk.message.thinking;
             touchGeneration("thinking");
             if (!reportedThinkingStart) {
@@ -1795,9 +1882,8 @@ async function streamChat(model, messages, thinkValue, documentContext = {}) {
               });
             }
           }
-          if (chunk.message?.content) {
-            const isFirstAnswerChunk = !sawFirstChunk;
-            if (!sawFirstChunk && state.assistantWait) {
+          if (chunk?.message?.content) {
+            if (renderOutput && !sawFirstChunk && state.assistantWait) {
               state.assistantWait.remove();
               state.assistantWait = null;
               state.assistantWaitLabel = null;
@@ -1805,194 +1891,155 @@ async function streamChat(model, messages, thinkValue, documentContext = {}) {
             }
             sawFirstChunk = true;
             full += chunk.message.content;
-            if (state.assistantPre) {
-              setAssistantAnswerText(state.assistantPre, full);
-            }
+            if (renderOutput && state.assistantPre) setAssistantAnswerText(state.assistantPre, full);
             touchGeneration("answer");
-            if (isFirstAnswerChunk) {
-              debugLog("stream_answer_seen", {
-                requestId: state.activeRequestId,
-                chars: full.length,
-              });
-            }
           }
         }
       }
-      newlineIndex = buffer.indexOf("\n");
     }
 
-    if (includeTrailing) {
-      const trailing = buffer.trim();
-      buffer = "";
-      if (trailing) {
-        let chunk;
-        try {
-          chunk = JSON.parse(trailing);
-        } catch {
-          chunk = null;
-        }
-
-        if (chunk?.error) throw publicError("The model request failed.", extractErrorDetails(chunk.error));
-        if (chunk?.message?.thinking) {
-          thinkingFull += chunk.message.thinking;
-          touchGeneration("thinking");
-          if (!reportedThinkingStart) {
-            reportedThinkingStart = true;
-            debugLog("stream_thinking_seen", {
-              requestId: state.activeRequestId,
-              chars: thinkingFull.length,
-            });
-          }
-        }
-        if (chunk?.message?.content) {
-          if (!sawFirstChunk && state.assistantWait) {
-            state.assistantWait.remove();
-            state.assistantWait = null;
-            state.assistantWaitLabel = null;
-            state.assistantPendingBubble?.classList.remove("is-pending");
-          }
-          sawFirstChunk = true;
-          full += chunk.message.content;
-          if (state.assistantPre) setAssistantAnswerText(state.assistantPre, full);
-          touchGeneration("answer");
-        }
-      }
-    }
-  }
-
-  async function waitForNextPoll() {
-    await new Promise((resolve) => {
-      const finish = () => {
-        clearTimeout(timer);
-        document.removeEventListener("visibilitychange", finish);
-        resolve();
-      };
-      const timer = setTimeout(finish, document.hidden ? CHAT_JOB_HIDDEN_POLL_MS : CHAT_JOB_POLL_MS);
-      document.addEventListener("visibilitychange", finish, { once: true });
-    });
-  }
-
-  while (true) {
-    let update;
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), CHAT_JOB_FETCH_TIMEOUT_MS);
-    try {
-      // Every successful poll advances an immutable offset. If Chrome suspends
-      // this fetch, retrying the same offset safely requests only missed text.
-      const response = await fetch(`/api/chat/jobs/${encodeURIComponent(jobId)}?offset=${offset}`, {
-        cache: "no-store",
-        headers: traceHeaders(),
-        signal: controller.signal,
+    async function waitForNextPoll() {
+      await new Promise((resolve) => {
+        const finish = () => {
+          clearTimeout(timer);
+          document.removeEventListener("visibilitychange", finish);
+          if (state.wakeChatPoll === finish) state.wakeChatPoll = null;
+          resolve();
+        };
+        const timer = setTimeout(finish, document.hidden ? CHAT_JOB_HIDDEN_POLL_MS : CHAT_JOB_POLL_MS);
+        state.wakeChatPoll = finish;
+        document.addEventListener("visibilitychange", finish, { once: true });
       });
-      if (!response.ok) {
-        const body = await response.text();
-        const responseError = apiResponseError(body, "The response could not be retrieved.", response.status);
-        responseError.retryable = response.status >= 500;
-        throw responseError;
-      }
-      update = await response.json();
-      visibleDisconnectedAt = 0;
-      if (state.generationSession) {
-        state.generationSession.reconnecting = false;
-        renderGenerationStatus();
-      }
-    } catch (error) {
-      if (error.retryable === false) throw error;
-      if (document.hidden) {
-        // Give the network a fresh recovery window after a suspended tab becomes
-        // visible; time spent frozen in the background must not consume it.
-        visibleDisconnectedAt = 0;
-      } else if (!visibleDisconnectedAt) {
-        visibleDisconnectedAt = Date.now();
-      }
-      const retryExpired = visibleDisconnectedAt
-        && Date.now() - visibleDisconnectedAt >= CHAT_JOB_VISIBLE_RETRY_MS;
-      if (retryExpired) {
-        throw new Error("Could not reconnect to the in-progress response.");
-      }
-      // Keep the idle timer from replacing the connection recovery message.
+    }
+
+    function showReconnecting() {
+      // Connectivity failures do not prove the model stopped. Retain this stage
+      // and all provisional UI until the server confirms a terminal outcome.
       if (state.generationSession) state.generationSession.reconnecting = true;
-      setBusy(true, document.hidden ? "Response continues in the background…" : "Reconnecting to response…");
+      setBusy(true, state.stopRequested
+        ? "Stop pending — reconnecting to response…"
+        : document.hidden ? "Response continues in the background…" : "Reconnecting to response…");
+    }
+
+    async function fetchJobUpdate(url, options = {}) {
+      const controller = new AbortController();
+      const timeout = setTimeout(() => controller.abort(), CHAT_JOB_FETCH_TIMEOUT_MS);
+      try {
+        const response = await fetch(url, { cache: "no-store", headers: traceHeaders(), ...options, signal: controller.signal });
+        if (!response.ok) {
+          const body = await response.text();
+          const responseError = apiResponseError(body, "The response could not be retrieved.", response.status);
+          responseError.retryable = response.status >= 500;
+          if (url === "/api/chat/jobs" && responseError.referenceId) {
+            // A structured application rejection (for example retained-job
+            // capacity) is definitive. Only ambiguous transport/proxy failures
+            // should keep retrying creation with the same stage ID.
+            responseError.retryable = false;
+          }
+          throw responseError;
+        }
+        return await response.json();
+      } finally {
+        clearTimeout(timeout);
+      }
+    }
+
+    while (true) {
+      let update;
+      try {
+        if (state.stopRequested) {
+          // Repeat cancellation after an ambiguous disconnect. The endpoint is
+          // idempotent, and polling decides whether Stop or completion won.
+          await fetchJobUpdate(`/api/chat/jobs/${encodeURIComponent(jobId)}/cancel`, { method: "POST" });
+        }
+        update = await fetchJobUpdate(`/api/chat/jobs/${encodeURIComponent(jobId)}?offset=${offset}`);
+        if (state.generationSession) {
+          state.generationSession.reconnecting = state.stopRequested;
+          renderGenerationStatus();
+        } else {
+          // Follow-up jobs run after the first-pass monitor stops. A successful
+          // poll must replace their reconnect label as well.
+          setBusy(true, state.stopRequested ? "Stopping response…" : "Generating final answer…");
+        }
+      } catch (error) {
+        if (error.retryable === false) throw error;
+        showReconnecting();
+        await waitForNextPoll();
+        continue;
+      }
+
+      if (!Number.isInteger(update.offset) || update.offset < offset || typeof update.data !== "string") {
+        throw new Error("Hypermania returned an invalid response update.");
+      }
+      offset = update.offset;
+      if (update.status === "canceled") {
+        const error = new Error("Response stopped.");
+        error.name = "ChatCanceledError";
+        throw error;
+      }
+      buffer += update.data;
+      consumeBufferedLines(update.status === "complete" || update.status === "failed");
+
+      if (renderOutput && state.assistantPre && !sawFirstChunk) {
+        setAssistantAnswerText(state.assistantPre, "");
+        scrollMessagesToBottom();
+      }
+      if (update.status === "failed") {
+        throw publicError(
+          update.error || "The model request failed.",
+          update.error || "The model request failed.",
+          update.requestId
+        );
+      }
+      if (update.status === "complete") break;
       await waitForNextPoll();
-      continue;
-    } finally {
-      clearTimeout(timeout);
     }
 
-    if (!Number.isInteger(update.offset) || update.offset < offset || typeof update.data !== "string") {
-      throw new Error("Hypermania returned an invalid response update.");
+    if (renderOutput && state.assistantWait) {
+      state.assistantWait.remove();
+      state.assistantWait = null;
+      state.assistantWaitLabel = null;
     }
-    offset = update.offset;
-    buffer += update.data;
-    consumeBufferedLines(update.status === "complete" || update.status === "failed");
 
-    if (state.assistantPre && !sawFirstChunk) {
-      setAssistantAnswerText(state.assistantPre, "");
+    if (renderOutput) state.assistantPendingBubble?.classList.remove("is-pending");
+
+    if (renderOutput && state.assistantPre) {
+      const cleanedThinking = cleanThinkingText(thinkingFull);
+      if (full) {
+        setAssistantAnswerText(state.assistantPre, full);
+      } else if (cleanedThinking) {
+        setAssistantAnswerText(state.assistantPre, "(The model completed its reasoning but returned no final answer.)");
+      } else {
+        setAssistantAnswerText(state.assistantPre, "(Model returned no visible answer.)");
+      }
       scrollMessagesToBottom();
     }
-    if (update.status === "failed") {
-      throw publicError(
-        update.error || "The model request failed.",
-        update.error || "The model request failed.",
-        update.requestId
-      );
-    }
-    if (update.status === "complete") break;
-    await waitForNextPoll();
+
+    return { content: full, thinking: cleanThinkingText(thinkingFull) };
+  } finally {
+    state.activeJobId = null;
+    state.wakeChatPoll = null;
+    setBusy(true);
   }
-
-  if (state.assistantWait) {
-    state.assistantWait.remove();
-    state.assistantWait = null;
-    state.assistantWaitLabel = null;
-  }
-
-  state.assistantPendingBubble?.classList.remove("is-pending");
-
-  if (state.assistantPre) {
-    const cleanedThinking = cleanThinkingText(thinkingFull);
-    if (full) {
-      setAssistantAnswerText(state.assistantPre, full);
-    } else if (cleanedThinking) {
-      setAssistantAnswerText(state.assistantPre, "(The model completed its reasoning but returned no final answer.)");
-    } else {
-      setAssistantAnswerText(state.assistantPre, "(Model returned no visible answer.)");
-    }
-    scrollMessagesToBottom();
-  }
-
-  return { content: full, thinking: cleanThinkingText(thinkingFull) };
 }
 
 async function fetchChatOnce(model, messages, thinkValue, documentContext = {}) {
-  const requestBody = buildRequestBody(model, messages, thinkValue, false, documentContext);
-
-  const res = await fetch("/api/chat", {
-    method: "POST",
-    headers: traceHeaders(),
-    body: JSON.stringify(requestBody),
-  });
-
-  if (!res.ok) {
-    const body = await res.text();
-    throw apiResponseError(body, "The model request failed.", res.status);
-  }
-
-  const data = await res.json();
+  // Follow-up generation needs the same retention and Stop semantics as the
+  // first pass, without replacing the visible first-pass text while it runs.
+  const result = await streamChat(model, messages, thinkValue, documentContext, false);
   debugLog("fallback_response", {
     requestId: state.activeRequestId,
-    contentChars: data.message?.content?.length || 0,
-    thinkingChars: data.message?.thinking?.length || 0,
+    contentChars: result.content.length,
+    thinkingChars: result.thinking.length,
   });
-  return {
-    content: data.message?.content || "",
-    thinking: data.message?.thinking || "",
-  };
+  return result;
 }
 
 async function sendChat() {
   if (state.requestInProgress) return;
   clearError();
+  el("responseNotice").hidden = true;
+  el("responseNotice").textContent = "";
 
   // Preserve the exact draft for recovery while continuing to send the
   // whitespace-normalized prompt used by the existing request contract.
@@ -2036,6 +2083,10 @@ async function sendChat() {
   const requestId = makeConversationId();
   state.activeRequestId = requestId;
   state.requestInProgress = true;
+  // Every generation stage in this send shares the policy chosen at submission;
+  // later preference changes must not alter an already-running request.
+  state.activeKeepWorking = el("keepWorking").checked;
+  state.stopRequested = false;
   const historyStartIndex = state.history.length;
   const documentsStartIndex = state.documents.length;
 
@@ -2050,6 +2101,7 @@ async function sendChat() {
   setAttachmentTrayOpen(false);
   setBusy(true, pendingPdfs.length ? pdfPreparationStatus(pendingPdfs[0], 1, pendingPdfs.length) : "Waiting for Ollama…");
   let assistant = null;
+  let stopped = false;
 
   try {
     assistant = createAssistantMessage(`Model: ${model}`);
@@ -2103,13 +2155,20 @@ async function sendChat() {
     // Streaming is over. Fallback and persistence own their status from here.
     stopGenerationMonitor();
     if (!reply) {
+      // Stop may race a completed first pass with no answer. Do not let that
+      // intent silently start another expensive model request.
+      if (state.stopRequested) {
+        const error = new Error("Response stopped.");
+        error.name = "ChatCanceledError";
+        throw error;
+      }
       debugLog("stream_without_final_answer", {
         requestId,
         thinkingChars: thinking.length,
       });
       setBusy(true, thinking
         ? "Polishing final answer…"
-        : "Retrying without streaming…");
+        : "Retrying final answer…");
       if (cleanThinkingText(thinking)) {
         const polished = await polishFinalAnswer(model, state.history, thinking, userContent);
         reply = polished.content || reply;
@@ -2174,14 +2233,25 @@ async function sendChat() {
     // both an assistant bubble and the error banner.
     renderedUserMessage.row.remove();
     assistant?.answerRow.remove();
+    if (error.name === "ChatCanceledError") {
+      stopped = true;
+      clearError();
+      debugLog("send_stopped", { requestId });
+      // The provisional progress bubble is gone. Keep a neutral confirmation
+      // beside the restored draft; the existing status live region announces it.
+      el("responseNotice").textContent = "Stopped. Your message and attachments are ready to send again.";
+      el("responseNotice").hidden = false;
+      endGenerationMonitor("Stopped. Your message and attachments are ready to send again.");
+      return;
+    }
     showError("The response could not be completed.", hint, {
       referenceId,
       retry: true,
     });
-    debugLog("send_error", {
-      requestId,
-      message: diagnostic,
-    });
+    // Model/proxy error text may echo private prompts, filenames, or output.
+    // The correlated backend event owns diagnostics; client logs record only a
+    // fixed lifecycle classification, never the untrusted exception message.
+    debugLog("send_error", { requestId, reason: "request_failed" });
     endGenerationMonitor("Request failed. Your message is ready to retry.");
   } finally {
     state.requestInProgress = false;
@@ -2191,6 +2261,12 @@ async function sendChat() {
     state.assistantWait = null;
     state.assistantWaitLabel = null;
     state.activeRequestId = null;
+    state.activeJobId = null;
+    state.stopRequested = false;
+    setBusy(false);
+    // The Stop control disappears when its job resolves; return keyboard users
+    // to the recovered draft instead of leaving focus on a hidden control.
+    if (stopped) el("prompt").focus();
   }
 }
 
@@ -2242,6 +2318,11 @@ function attachFileHandling() {
 }
 
 el("send").addEventListener("click", sendChat);
+el("stopResponse").addEventListener("click", requestResponseStop);
+el("keepWorking").checked = window.hypermaniaPreferences.getKeepWorking();
+el("keepWorking").addEventListener("change", () => {
+  window.hypermaniaPreferences.setKeepWorking(el("keepWorking").checked);
+});
 el("newChat").addEventListener("click", () => startNewConversation());
 el("modelCapabilitiesButton").addEventListener("click", openModelCapabilities);
 el("closeModelCapabilities").addEventListener("click", () => el("modelCapabilitiesDialog").close());

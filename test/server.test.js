@@ -19,6 +19,7 @@ let pdfToolRunner;
 let lastChatRequest;
 let chatRequestCount = 0;
 let releaseHeldChat;
+const heldChatClosed = new Set();
 let appOutput = "";
 
 function listen(server, port = 0) {
@@ -163,9 +164,25 @@ if (tool === "pdfinfo") {
     if (req.url === "/api/chat") {
       chatRequestCount += 1;
       lastChatRequest = await readJson(req);
+      const heldMode = lastChatRequest.messages?.at(-1)?.content;
+      if (heldMode === "hold-headers" || heldMode === "hold-stream") {
+        // Observe the actual upstream socket closing, rather than accepting a
+        // local canceled label as evidence that Stop reached the model request.
+        res.once("close", () => heldChatClosed.add(heldMode));
+        if (heldMode === "hold-stream") {
+          res.writeHead(200, { "Content-Type": "application/x-ndjson" });
+          res.write('{"message":{"content":"unfinished"},"done":false}\n');
+        }
+        return;
+      }
       if (lastChatRequest.messages?.at(-1)?.content === "job-failure") {
         res.writeHead(500, { "Content-Type": "application/json" });
         res.end(JSON.stringify({ error: "mock generation failed" }));
+        return;
+      }
+      if (lastChatRequest.messages?.at(-1)?.content === "private-upstream-error") {
+        res.writeHead(422, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ error: "PRIVATE_PROMPT_SENTINEL PRIVATE_FILENAME_SENTINEL.pdf PRIVATE_ANSWER_SENTINEL" }));
         return;
       }
       if (lastChatRequest.messages?.at(-1)?.content === "delayed-headers") {
@@ -412,6 +429,59 @@ test("preserves Unicode split across upstream byte chunks", async () => {
   assert.equal(completed.offset, expected.length);
 });
 
+test("recovers lost creation acknowledgments without duplicate inference or leaking app options", async () => {
+  const requestsBefore = chatRequestCount;
+  const jobId = randomUUID();
+  const options = { jobId, keepWorking: true };
+  const first = await startChatJob("idempotent-recovery", options);
+  await waitForChatJob(first.id, (job) => job.status === "complete");
+  // Treat the first acknowledgment as lost: repeat exactly the original stage.
+  const recovered = await startChatJob("idempotent-recovery", options);
+  assert.deepEqual(recovered, first);
+  assert.equal(first.id, jobId);
+  assert.equal(chatRequestCount, requestsBefore + 1);
+  assert.equal(lastChatRequest.keepWorking, undefined);
+  assert.equal(lastChatRequest.jobId, undefined);
+
+  const conflict = await fetch(`${appBase}/api/chat/jobs`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ model: "test-model:latest", messages: [], ...options }),
+  });
+  assert.equal(conflict.status, 409);
+  const canceled = await fetch(`${appBase}/api/chat/jobs/${jobId}/cancel`, { method: "POST" });
+  assert.equal(canceled.status, 200);
+  assert.equal((await canceled.json()).status, "complete");
+  assert.equal((await fetchChatJob(jobId)).status, "complete");
+});
+
+for (const mode of ["hold-headers", "hold-stream"]) {
+  test(`Stop disconnects only the active upstream request (${mode}) and is idempotent`, async () => {
+    heldChatClosed.delete(mode);
+    const requestsBefore = chatRequestCount;
+    const started = await startChatJob(mode, { keepWorking: true });
+    await waitForChatJob(started.id, (job) => mode === "hold-stream" ? job.data.includes("unfinished") : true);
+    // Wait until the mock received the request even when no headers were sent.
+    const deadline = Date.now() + 1000;
+    while (chatRequestCount === requestsBefore && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    for (let attempt = 0; attempt < 2; attempt += 1) {
+      const stopped = await fetch(`${appBase}/api/chat/jobs/${started.id}/cancel`, { method: "POST" });
+      assert.equal(stopped.status, 200);
+      assert.deepEqual(await stopped.json(), { status: "canceled", requestId: started.requestId });
+    }
+    const canceled = await waitForChatJob(started.id, (job) => job.status === "canceled");
+    assert.equal(canceled.error, undefined);
+    while (!heldChatClosed.has(mode) && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+    assert.equal(heldChatClosed.has(mode), true, "upstream connection must close");
+    const unrelated = await startChatJob("isolation-survives-stop");
+    await waitForChatJob(unrelated.id, (job) => job.status === "complete");
+  });
+}
+
 test("logs allowlisted Ollama timing and prompt-cache metrics across split chunks", async () => {
   const threadId = randomUUID();
   const requestId = randomUUID();
@@ -530,8 +600,20 @@ test("correlates a failed send without exposing diagnostics or forwarding trace 
   assert.equal(logEntry.threadId, threadId);
   assert.equal(logEntry.jobId, started.id);
   assert.equal(logEntry.status, "failed");
-  assert.match(logEntry.error, /mock generation failed/);
+  assert.equal(logEntry.error, "upstream_http_error");
+  assert.equal(logEntry.upstreamStatus, 500);
   assert.doesNotMatch(JSON.stringify(logEntry), /messages|job-failure/);
+});
+
+test("upstream HTTP error bodies never enter lifecycle logs", async () => {
+  const { id, requestId } = await startChatJob("private-upstream-error", { keepWorking: true });
+  const failed = await waitForChatJob(id, (job) => job.status === "failed");
+  const entry = await waitForLogEntry(requestId, (item) => item.source === "chat_job" && item.event === "finished");
+  assert.equal(entry.error, "upstream_http_error");
+  assert.equal(entry.upstreamStatus, 422);
+  assert.doesNotMatch(JSON.stringify(failed), /PRIVATE_PROMPT_SENTINEL|PRIVATE_FILENAME_SENTINEL|PRIVATE_ANSWER_SENTINEL/);
+  const logText = await fs.promises.readFile(logFile, "utf8");
+  assert.doesNotMatch(logText, /PRIVATE_PROMPT_SENTINEL|PRIVATE_FILENAME_SENTINEL|PRIVATE_ANSWER_SENTINEL/);
 });
 
 test("validates retained-job methods, payloads, IDs, and offsets", async (t) => {
@@ -553,6 +635,21 @@ test("validates retained-job methods, payloads, IDs, and offsets", async (t) => 
       assert.equal(result.error, "Invalid chat request.");
       assert.match(result.requestId, /^[a-f0-9-]{36}$/);
     }
+  });
+
+  await t.test("rejects invalid application policy and recovery IDs", async () => {
+    for (const options of [{ keepWorking: "true" }, { keepWorking: null }, { jobId: "bad" }, { jobId: null }]) {
+      const response = await fetch(`${appBase}/api/chat/jobs`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "test-model:latest", messages: [], ...options }),
+      });
+      assert.equal(response.status, 400);
+    }
+    const unknown = await fetch(`${appBase}/api/chat/jobs/${randomUUID()}/cancel`, { method: "POST" });
+    assert.equal(unknown.status, 404);
+    const wrongMethod = await fetch(`${appBase}/api/chat/jobs/${randomUUID()}/cancel`);
+    assert.equal(wrongMethod.status, 405);
   });
 
   await t.test("does not expose unknown or malformed job IDs", async () => {
