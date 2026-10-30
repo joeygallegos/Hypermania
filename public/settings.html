@@ -23,6 +23,7 @@
         </div>
 
         <div class="settings-group">
+          <h3>Connection</h3>
           <div class="instance-setting">
             <label for="ollamaBase">Ollama instance</label>
             <div class="row instance-row">
@@ -30,6 +31,7 @@
               <button id="saveOllamaBase" type="button" class="secondary">Connect</button>
             </div>
             <div id="ollamaBaseHint" class="hint">Loading configured endpoint…</div>
+            <p class="hint">Connection changes last until Hypermania restarts. The server configuration controls the startup connection.</p>
           </div>
 
           <div class="setting-block">
@@ -39,6 +41,10 @@
             <button id="refreshModels" type="button" class="secondary">Refresh models</button>
           </div>
 
+          <h3>Response preferences</h3>
+          <p class="hint">Saved chats, prompts, and preferences are shared by everyone using this server.</p>
+          <p><button id="reloadPreferences" type="button" class="secondary">Reload preferences</button></p>
+          <p class="hint">Thinking and context changes are saved automatically for future messages.</p>
           <label>
             Thinking
             <select id="thinkMode">
@@ -60,7 +66,7 @@
               <option value="16384">16k</option>
               <option value="32768">32k</option>
             </select>
-            <div class="hint think-hint">Sent as Ollama <code>options.num_ctx</code>. Higher values use more VRAM.</div>
+            <div class="hint think-hint">How much conversation and document text the model can consider. Larger values use more GPU memory.</div>
           </label>
 
           <div class="setting-block">
@@ -70,14 +76,27 @@
               Sent before the conversation on every future request. Leave blank to send no system instruction.
             </div>
             <div class="settings-actions">
-              <button id="saveSystemInstruction" type="button">Save instruction</button>
+              <span id="instructionSaveState" class="hint" role="status">Saved</span>
+              <button id="saveSystemInstruction" type="button" disabled>Save instruction</button>
             </div>
           </div>
         </div>
       </section>
+      <section class="panel settings-page" aria-labelledby="browserImportTitle">
+        <h2 id="browserImportTitle">Import browser data</h2>
+        <p>Import this browser’s older chats and prompt versions into shared server storage. Everyone using this server can access imported data. Browser originals remain untouched.</p>
+        <label><input id="importPreferences" type="checkbox" /> Also import this browser’s preferences</label>
+        <button id="importBrowserData" type="button" class="secondary">Review browser import</button>
+        <p id="browserImportStatus" role="status" aria-live="polite"></p>
+      </section>
     </main>
 
+    <script src="/server-storage.js"></script>
     <script src="/preferences.js"></script>
     <script src="/settings.js"></script>
+    <script src="/chat-history.js"></script>
+    <script src="/document-context.js"></script>
+    <script src="/prompt-library.js"></script>
+    <script src="/browser-import.js"></script>
   </body>
 </html>

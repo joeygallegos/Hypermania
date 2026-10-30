@@ -3,15 +3,15 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const path = require("node:path");
 const vm = require("node:vm");
-const { createLibrary } = require("../public/prompt-library.js");
+const promptHelpers = require("../public/prompt-library.js");
 
-function editor() {
+async function editor() {
   // DOM doubles cover event wiring and literal rendering; they do not claim to test layout.
   class Element {
     constructor() { this.value = ""; this.children = []; this.listeners = {}; this.attributes = {}; }
     addEventListener(type, handler) { this.listeners[type] = handler; }
-    dispatchEvent(event) { this.listeners[event.type]?.(event); }
-    click() { this.dispatchEvent({ type: "click" }); }
+    dispatchEvent(event) { return this.listeners[event.type]?.(event); }
+    click() { return this.dispatchEvent({ type: "click" }); }
     append(...nodes) { this.children.push(...nodes); }
     replaceChildren() { this.children = []; }
     setAttribute(key, value) { this.attributes[key] = value; }
@@ -23,26 +23,31 @@ function editor() {
     if (!nodes.has(id)) nodes.set(id, new Element());
     return nodes.get(id);
   };
-  let raw = null;
+  let values = [];
+  let revision = 0;
+  let nextId = 0;
   let fail = false;
   let confirm = true;
   let copied = "";
   const events = {};
+  const window = {
+    hypermaniaStorage: { makeId: () => `test-prompt-${++nextId}`, request: async (_route, method, payload) => {
+      if (fail) throw new Error("Storage unavailable");
+      if (method === "PUT") { values = structuredClone(payload.value); revision++; }
+      return { value: structuredClone(values), revision };
+    } },
+    hypermaniaPromptLibrary: promptHelpers,
+    addEventListener: (type, handler) => { events[type] = handler; },
+    confirm: () => confirm,
+  };
   vm.runInNewContext(fs.readFileSync(path.join(__dirname, "../public/saved-prompts.js"), "utf8"), {
     document: { getElementById: get, createElement: () => new Element() },
-    window: {
-      addEventListener: (type, handler) => { events[type] = handler; },
-      hypermaniaPromptLibrary: { createLibrary },
-      localStorage: {
-        getItem: () => raw,
-        setItem: (_key, value) => { if (fail) throw new Error("Quota"); raw = value; },
-      },
-      confirm: () => confirm,
-    },
+    window,
     crypto: { randomUUID: () => "test-prompt" },
     navigator: { clipboard: { writeText: async (text) => { if (fail) throw new Error("Denied"); copied = text; } } },
     Event: class { constructor(type) { this.type = type; } },
   });
+  await window.hypermaniaPromptsReady;
   return {
     get,
     events,
@@ -50,27 +55,27 @@ function editor() {
     save(title, content) {
       get("savedPromptTitle").value = title;
       get("savedPromptContent").value = content;
-      get("savedPromptForm").dispatchEvent({ type: "submit", preventDefault() {} });
+      return get("savedPromptForm").dispatchEvent({ type: "submit", preventDefault() {} });
     },
     fail: () => { fail = true; },
     decline: () => { confirm = false; },
   };
 }
 
-test("editor renders dated versions literally, newest first, and reopens persisted prompts", () => {
-  const { get, save } = editor();
-  save("Review", "Original");
-  save("Review", "<script>literal</script>");
+test("editor renders dated versions literally, newest first, and reopens persisted prompts", async () => {
+  const { get, save } = await editor();
+  await save("Review", "Original");
+  await save("Review", "<script>literal</script>");
   assert.equal(get("savedPromptVersions").children.length, 2);
   assert.equal(get("savedPromptVersions").children[0].children[1].textContent, "<script>literal</script>");
-  get("reloadSavedPrompts").click();
+  await get("reloadSavedPrompts").click();
   get("savedPromptList").children[0].children[0].click();
   assert.equal(get("savedPromptContent").value, "<script>literal</script>");
 });
 
 test("copy reuses prompt text and offers manual selection when clipboard is blocked", async () => {
-  const { get, save, copied, fail } = editor();
-  save("Review", "Saved text");
+  const { get, save, copied, fail } = await editor();
+  await save("Review", "Saved text");
   await get("copySavedPrompt").listeners.click();
   assert.equal(copied(), "Saved text");
   assert.match(get("savedPromptsStatus").textContent, /Prompt copied/);
@@ -80,28 +85,28 @@ test("copy reuses prompt text and offers manual selection when clipboard is bloc
   assert.match(get("savedPromptsStatus").textContent, /copy it manually/);
 });
 
-test("failed saves retain edits and previous history; deletion removes the prompt", () => {
-  const { get, save, fail } = editor();
-  save("Review", "Original");
+test("failed saves retain edits and previous history; deletion removes the prompt", async () => {
+  const { get, save, fail } = await editor();
+  await save("Review", "Original");
   fail();
-  save("Review", "Unsaved edits");
+  await save("Review", "Unsaved edits");
   assert.equal(get("savedPromptContent").value, "Unsaved edits");
   assert.equal(get("savedPromptVersions").children.length, 1);
   assert.equal(get("savedPromptsStatus").attributes.role, "alert");
-  const other = editor();
-  other.save("Review", "Original");
-  other.get("deleteSavedPrompt").click();
+  const other = await editor();
+  await other.save("Review", "Original");
+  await other.get("deleteSavedPrompt").click();
   assert.equal(other.get("savedPromptList").children.length, 0);
   assert.equal(other.get("savedPromptVersions").children.length, 0);
 });
 
-test("whitespace errors are clear and declined navigation preserves edits", () => {
-  const { get, save, decline, events } = editor();
-  save(" ", "\n");
+test("whitespace errors are clear and declined navigation preserves edits", async () => {
+  const { get, save, decline, events } = await editor();
+  await save(" ", "\n");
   assert.equal(get("savedPromptsStatus").textContent, "Enter a prompt name and prompt text.");
   decline();
   get("newSavedPrompt").click();
-  get("reloadSavedPrompts").click();
+  await get("reloadSavedPrompts").click();
   assert.equal(get("savedPromptTitle").value, " ");
   let prevented = false;
   events.beforeunload({ preventDefault: () => { prevented = true; } });

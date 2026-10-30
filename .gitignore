@@ -17,3 +17,10 @@ public/*.css.map
 Thumbs.db
 *.swp
 *.swo
+
+# Server-local conversations, attachments, and SQLite journals
+data/
+*.sqlite
+*.sqlite-journal
+*.sqlite-wal
+*.sqlite-shm

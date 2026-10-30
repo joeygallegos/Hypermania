@@ -50,7 +50,7 @@ function harness() {
   }
   for (const id of ["preview", "attachmentTray", "attachmentToggle", "dropzone", "dropLabel", "dropHint",
     "images", "prompt", "model", "thinkMode", "thinkingControl", "status", "send", "newChat", "conversationList",
-    "keepWorking", "stopResponse", "responseNotice"]) {
+    "keepWorking", "stopResponse", "responseNotice", "modelOptions"]) {
     nodes.set(id, new Element());
   }
   nodes.get("attachmentTray").hidden = true;
@@ -58,6 +58,7 @@ function harness() {
   const state = { images: [], pdfs: [], documents: [], requestInProgress: false, sendLabel: "Send" };
   const errors = [];
   const context = vm.createContext({
+    window: { hypermaniaPreferences: { getSystemInstruction: () => "" } },
     state, document, el: (id) => nodes.get(id), MAX_CONVERSATION_DOCUMENTS: 16,
     makeConversationId: () => "test-id", isPdf: (file) => file.type === "application/pdf",
     fileToDataUrl: async () => "data:image/png;base64,aGVsbG8=",
@@ -172,6 +173,7 @@ test("mocked send collapses immediately, retains failed files, and clears succes
   const noOp = () => {};
   Object.assign(context, {
     clearError: noOp, historyHasImages: () => false, getThinkPayload: () => undefined,
+    scrollMessagesToBottom: noOp,
     supportsVision: () => true, addMessage: () => ({ row: { remove: noOp } }),
     pdfPreparationStatus: () => "Preparing mock PDF…", setAssistantAnswerText: noOp,
     createAssistantMessage: () => ({ answerPre: {}, answerNode: {}, pending: {}, pendingLabel: {}, answerRow: { remove: noOp } }),
@@ -237,7 +239,7 @@ test("mocked send collapses immediately, retains failed files, and clears succes
     CHAT_JOB_FETCH_TIMEOUT_MS: 15000, CHAT_JOB_POLL_MS: 400, CHAT_JOB_HIDDEN_POLL_MS: 2000,
     buildRequestBody: () => ({}), traceHeaders: () => ({}), cleanThinkingText: (text) => text,
   });
-  vm.runInContext(source.slice(source.indexOf("function debugLog("), source.indexOf("function requestResult(")), context);
+  vm.runInContext(source.slice(source.indexOf("function debugLog("), source.indexOf("function makeConversationId(")), context);
   vm.runInContext(source.slice(source.indexOf("function extractErrorDetails("), source.indexOf("function imageSupportHint(")), context);
   vm.runInContext(source.slice(source.indexOf("function requestResponseStop("), source.indexOf("async function sendChat(")), context);
   for (const suffix of ["\n", ""]) {
@@ -270,17 +272,23 @@ test("mocked send collapses immediately, retains failed files, and clears succes
   assert.equal(state.documents.length, 1);
   assert.equal(state.history.length, 2);
   assert.equal(nodes.get("attachmentTray").hidden, true);
-  assert.equal(nodes.get("attachmentToggle").textContent, "+ Add images or PDF");
+  assert.equal(nodes.get("attachmentToggle").textContent, "+ Attach");
 });
 
 
-test("active lifecycle notice remains visible before and after the waiting bubble is removed", () => {
+test("active lifecycle status has one visible location across waiting and streaming", () => {
   const { context, state, nodes } = harness();
   state.activeJobId = "retained-stage";
   state.assistantWaitLabel = { textContent: "" };
   context.setBusy(true, "Waiting for Ollama…");
-  assert.equal(nodes.get("responseNotice").hidden, false);
+  assert.equal(nodes.get("send").hidden, true);
+  assert.equal(nodes.get("stopResponse").hidden, false);
+  assert.equal(nodes.get("responseNotice").hidden, true);
+  assert.equal(nodes.get("responseNotice").textContent, "");
   assert.equal(state.assistantWaitLabel.textContent, "Waiting for Ollama…");
+  context.setBusy(true, "Reconnecting to response…");
+  assert.equal(state.assistantWaitLabel.textContent, "Reconnecting to response…");
+  assert.equal(nodes.get("responseNotice").hidden, true);
   // Receiving answer text removes the pending bubble in the actual stream.
   state.assistantWaitLabel = null;
   context.setBusy(true, "Reconnecting to response…");
@@ -292,8 +300,19 @@ test("active lifecycle notice remains visible before and after the waiting bubbl
   state.stopRequested = false;
   context.setBusy(true, "Generating answer…");
   assert.equal(nodes.get("responseNotice").textContent, "Generating answer…");
+  // A new pending bubble takes over even if a prior stage showed a notice.
+  state.assistantWaitLabel = { textContent: "" };
+  context.setBusy(true, "Generating final answer…");
+  assert.equal(state.assistantWaitLabel.textContent, "Generating final answer…");
+  assert.equal(nodes.get("responseNotice").hidden, true);
+  assert.equal(nodes.get("responseNotice").textContent, "");
+  state.assistantWaitLabel = null;
+  context.setBusy(true, "Generating final answer…");
+  assert.equal(nodes.get("responseNotice").hidden, false);
   state.activeJobId = null;
   context.setBusy(true);
+  assert.equal(nodes.get("send").hidden, false);
+  assert.equal(nodes.get("stopResponse").hidden, true);
   assert.equal(nodes.get("responseNotice").hidden, true);
   assert.equal(nodes.get("responseNotice").textContent, "");
 });

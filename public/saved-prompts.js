@@ -1,6 +1,9 @@
 (() => {
   const get = (id) => document.getElementById(id);
-  let library;
+  let revision = 0;
+  let busy = false;
+  let loaded = false;
+  let pendingCommit = null;
   let prompts = [];
   let selectedId = null;
   let baseline = { title: "", content: "" };
@@ -10,12 +13,18 @@
     get("savedPromptsStatus").setAttribute("role", failed ? "alert" : "status");
   }
 
-  function attempt(action) {
-    try { action(); }
+  async function attempt(action) {
+    if (busy) return;
+    busy = true;
+    get("savedPromptTitle").disabled = true;
+    get("savedPromptContent").disabled = true;
+    try { await action(); }
     catch (error) {
-      // Storage exceptions may contain browser-specific details; show a safe recovery message.
-      report(error.message.startsWith("Saved prompts changed") ? error.message
-        : "Could not read or save prompts. Browser storage may be unavailable, full, or damaged. Your edits are still here.", true);
+      report(error.message || "Could not read or save prompts. Your edits are still here.", true);
+    } finally {
+      busy = false;
+      get("savedPromptTitle").disabled = false;
+      get("savedPromptContent").disabled = false;
     }
   }
 
@@ -24,7 +33,7 @@
   }
 
   function canDiscard() {
-    return !hasEdits() || window.confirm("Discard unsaved prompt changes?");
+    return !busy && (!hasEdits() || window.confirm("Discard unsaved prompt changes?"));
   }
 
   function edit(item) {
@@ -67,24 +76,36 @@
     }
   }
 
-  function loadLibrary() {
-    report("");
-    library = null;
-    attempt(() => {
-      library = window.hypermaniaPromptLibrary.createLibrary(window.localStorage, () => {
-        // Prompt IDs need local uniqueness, including on trusted-network HTTP origins.
-        return typeof crypto.randomUUID === "function" ? crypto.randomUUID()
-          : `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-      });
-      prompts = library.load();
+  async function loadLibrary() {
+    return attempt(async () => {
+      const result = await window.hypermaniaStorage.request("prompts");
+      if (!window.hypermaniaPromptLibrary.isValidPromptCollection(result.value)) throw new Error("Saved prompts could not be read.");
+      revision = result.revision;
+      prompts = result.value;
+      loaded = true;
+      pendingCommit = null;
       edit(null);
+      report("");
       get("savedPromptTitle").focus();
     });
   }
-  get("reloadSavedPrompts").addEventListener("click", () => { if (canDiscard()) loadLibrary(); });
+  async function commit(next) {
+    if (!loaded) throw new Error("Reload prompts before saving. Your edits are still here.");
+    const key = JSON.stringify({ selectedId, title: get("savedPromptTitle").value, content: get("savedPromptContent").value, deleting: !next.some((item) => item.id === selectedId) });
+    // A retry after a lost response must submit the original version timestamp,
+    // ID, and revision so the server can return its durable mutation receipt.
+    if (!pendingCommit || pendingCommit.key !== key) pendingCommit = {
+      key, payload: { revision, value: next, mutationId: window.hypermaniaStorage.makeId() },
+    };
+    const result = await window.hypermaniaStorage.request("prompts", "PUT", pendingCommit.payload);
+    pendingCommit = null;
+    revision = result.revision;
+    prompts = result.value;
+  }
+  get("reloadSavedPrompts").addEventListener("click", () => { if (canDiscard()) return loadLibrary(); });
   // Navigation, refresh, and closing the page must not silently discard editor changes.
   window.addEventListener("beforeunload", (event) => {
-    if (!hasEdits()) return;
+    if (!busy && !hasEdits()) return;
     event.preventDefault();
     event.returnValue = "";
   });
@@ -98,16 +119,26 @@
       report("Enter a prompt name and prompt text.", true);
       return;
     }
-    attempt(() => {
-      prompts = library.save(selectedId, get("savedPromptTitle").value, get("savedPromptContent").value);
+    return attempt(async () => {
+      const title = get("savedPromptTitle").value.trim();
+      const content = get("savedPromptContent").value;
+      const current = prompts.find((item) => item.id === selectedId);
+      const previous = current?.versions.at(-1);
+      if (previous?.title === title && previous.content === content) { report("Prompt unchanged."); return; }
+      const version = { title, content, savedAt: new Date().toISOString() };
+      const next = current
+        ? prompts.map((item) => item.id === selectedId ? { ...item, versions: [...item.versions, version] } : item)
+        : [...prompts, { id: window.hypermaniaStorage.makeId(), versions: [version] }];
+      if (!window.hypermaniaPromptLibrary.isValidPromptCollection(next)) throw new Error("Enter a name up to 120 characters and prompt text up to 50,000 characters.");
+      await commit(next);
       edit(prompts.find((item) => item.id === selectedId) || prompts.at(-1));
       report("Prompt saved.");
     });
   });
   get("deleteSavedPrompt").addEventListener("click", () => {
-    if (!selectedId || !window.confirm("Delete this saved prompt and all its versions? This cannot be undone.")) return;
-    attempt(() => {
-      prompts = library.remove(selectedId);
+    if (busy || !selectedId || !window.confirm("Delete this saved prompt and all its versions? This cannot be undone.")) return;
+    return attempt(async () => {
+      await commit(prompts.filter((item) => item.id !== selectedId));
       edit(null);
       report("Prompt deleted.");
     });
@@ -125,5 +156,5 @@
       report("Automatic copy is unavailable. The prompt text is selected; copy it manually.", true);
     }
   });
-  loadLibrary();
+  window.hypermaniaPromptsReady = loadLibrary();
 })();

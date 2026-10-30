@@ -1,3 +1,5 @@
+(async () => {
+  await window.hypermaniaPreferences.ready;
 const state = {
   threadId: makeConversationId(),
   activeRequestId: null,
@@ -7,9 +9,13 @@ const state = {
   activeConversation: null,
   preferredConversationModel: "",
   historyAvailable: true,
+  storageLoading: false,
   images: [],
   pdfs: [],
   models: [],
+  modelReady: false,
+  composerExpanded: false,
+  followOutput: true,
   modelInfo: new Map(),
   modelInfoErrors: new Set(),
   modelInfoLoading: new Set(),
@@ -28,9 +34,12 @@ const state = {
   requestInProgress: false,
   activeJobId: null,
   activeKeepWorking: true,
+  activeSystemInstruction: null,
   stopRequested: false,
   wakeChatPoll: null,
   responseNoticeIsProgress: false,
+  settingsPending: false,
+  pendingConversationSummary: null,
 };
 
 const el = (id) => document.getElementById(id);
@@ -53,7 +62,7 @@ const MAX_CONVERSATION_DOCUMENTS = 16;
 const CHAT_JOB_POLL_MS = 400;
 const CHAT_JOB_HIDDEN_POLL_MS = 2000;
 const CHAT_JOB_FETCH_TIMEOUT_MS = 15000;
-let chatDbPromise;
+
 
 function debugLog(event, details = {}) {
   const payload = {
@@ -68,57 +77,6 @@ function debugLog(event, details = {}) {
     body: JSON.stringify(payload),
     keepalive: true,
   }).catch(() => {});
-}
-
-function requestResult(request) {
-  return new Promise((resolve, reject) => {
-    request.addEventListener("success", () => resolve(request.result), { once: true });
-    request.addEventListener("error", () => reject(request.error), { once: true });
-  });
-}
-
-function transactionComplete(transaction) {
-  return new Promise((resolve, reject) => {
-    transaction.addEventListener("complete", resolve, { once: true });
-    transaction.addEventListener("abort", () => reject(transaction.error || new Error("Chat storage was interrupted.")), { once: true });
-    transaction.addEventListener("error", () => reject(transaction.error || new Error("Chat storage failed.")), { once: true });
-  });
-}
-
-function openChatDatabase() {
-  if (chatDbPromise) return chatDbPromise;
-
-  chatDbPromise = new Promise((resolve, reject) => {
-    const request = indexedDB.open(CHAT_DB_NAME, CHAT_DB_VERSION);
-    let blocked = false;
-
-    request.addEventListener("upgradeneeded", () => {
-      const database = request.result;
-      // Keep small sidebar metadata separate from message payloads. Otherwise,
-      // listing chat titles would clone every saved image out of IndexedDB.
-      if (!database.objectStoreNames.contains("conversations")) {
-        database.createObjectStore("conversations", { keyPath: "id" });
-      }
-      if (!database.objectStoreNames.contains("conversationData")) {
-        database.createObjectStore("conversationData", { keyPath: "id" });
-      }
-    });
-    request.addEventListener("success", () => {
-      if (blocked) {
-        request.result.close();
-        return;
-      }
-      request.result.addEventListener("versionchange", () => request.result.close());
-      resolve(request.result);
-    }, { once: true });
-    request.addEventListener("error", () => reject(request.error), { once: true });
-    request.addEventListener("blocked", () => {
-      blocked = true;
-      reject(new Error("Close other Hypermania tabs and try again."));
-    }, { once: true });
-  });
-
-  return chatDbPromise;
 }
 
 function makeConversationId() {
@@ -214,6 +172,7 @@ function markActiveChatUnsaved() {
 }
 
 function resetDraft() {
+  state.composerExpanded = false;
   state.images = [];
   state.pdfs = [];
   el("images").value = "";
@@ -229,7 +188,23 @@ function hasDraft() {
 }
 
 function updateSendState() {
-  el("send").disabled = state.requestInProgress || !hasDraft();
+  el("send").disabled = state.requestInProgress || state.storageLoading || Boolean(state.pendingConversationSummary) || state.modelReady === false || !hasDraft();
+  resizeComposer();
+}
+
+function resizeComposer() {
+  const toggle = el("expandComposer");
+  if (!toggle) return;
+  const prompt = el("prompt");
+  const viewportHeight = window.visualViewport?.height || window.innerHeight;
+  // Bound editing by available height so a pasted prompt cannot displace Stop.
+  const cap = Math.max(44, Math.min(state.composerExpanded ? 320 : 140,
+    Math.floor(viewportHeight * (state.composerExpanded ? 0.38 : 0.22))));
+  prompt.style.height = "auto";
+  prompt.style.maxHeight = `${cap}px`;
+  prompt.style.height = `${state.composerExpanded ? cap : Math.min(cap, Math.max(44, prompt.scrollHeight + 2))}px`;
+  toggle.textContent = state.composerExpanded ? "Collapse" : "Expand";
+  toggle.setAttribute("aria-expanded", String(state.composerExpanded));
 }
 
 function confirmDraftDiscard(action) {
@@ -237,9 +212,14 @@ function confirmDraftDiscard(action) {
 }
 
 function startNewConversation({ focus = true, confirmDraft = true } = {}) {
-  if (state.requestInProgress) return;
+  if (state.pendingConversationSummary) {
+    showError("This chat has an unsaved response.", "Retry saving or copy the response before reloading.");
+    return;
+  }
+  if (state.requestInProgress || state.storageLoading) return;
   if (confirmDraft && !confirmDraftDiscard("start a new chat")) return;
   state.history = [];
+  state.followOutput = true;
   state.documents = [];
   state.activeConversation = null;
   state.threadId = makeConversationId();
@@ -286,7 +266,7 @@ function renderStoredConversation(conversation) {
           : "(Model returned no visible answer.)");
       }
     }
-    scrollMessagesToBottom();
+    scrollMessagesToBottom(true);
   } finally {
     // Streaming token updates are intentionally excluded from live-region
     // announcements. The concise status region communicates request phases.
@@ -308,26 +288,26 @@ function applyConversationModel(model) {
   }
 
   select.value = model;
-  window.hypermaniaPreferences.setModel(model);
   renderModelMeta();
   renderThinkOptions(model, state.modelInfo.get(model));
   if (!state.modelInfo.has(model)) refreshModelInfo(model, true);
 }
 
-async function selectConversation(id, { focus = true, confirmDraft = true } = {}) {
-  if (state.requestInProgress) return;
+async function selectConversation(id, { focus = true, confirmDraft = true, reload = false } = {}) {
+  if (state.requestInProgress || state.storageLoading || state.pendingConversationSummary) return;
   const conversation = state.conversations.find((candidate) => candidate.id === id);
   if (!conversation) return;
-  if (state.activeConversation?.id === id) {
+  if (state.activeConversation?.id === id && !reload) {
     if (focus) el("prompt").focus();
     return;
   }
   if (confirmDraft && !confirmDraftDiscard("open another chat")) return;
 
+  state.storageLoading = true;
+  // Lock the whole multi-request download so late context cannot replace a newer draft.
+  setBusy(true, "Opening saved chat…");
   try {
-    const database = await openChatDatabase();
-    const transaction = database.transaction("conversationData", "readonly");
-    const record = await requestResult(transaction.objectStore("conversationData").get(id));
+    const record = await window.hypermaniaStorage.loadConversation(id);
     const supportedSchema = record?.schemaVersion === LEGACY_CHAT_SCHEMA_VERSION
       || record?.schemaVersion === CHAT_SCHEMA_VERSION;
     const documents = record?.schemaVersion === CHAT_SCHEMA_VERSION ? record.documents : [];
@@ -336,74 +316,42 @@ async function selectConversation(id, { focus = true, confirmDraft = true } = {}
       throw new Error("This saved chat is damaged or uses an unsupported format.");
     }
 
-    state.activeConversation = conversation;
-    // Older browser history may use a non-UUID key. Keep that storage key while
-    // assigning a valid correlation ID when the conversation is next opened.
-    state.threadId = isTraceId(conversation.threadId)
-      ? conversation.threadId
-      : isTraceId(conversation.id) ? conversation.id : makeConversationId();
+    state.activeConversation = record.summary;
+    state.conversations = state.conversations.map((item) => item.id === id ? record.summary : item);
+    state.threadId = isTraceId(record.summary.threadId)
+      ? record.summary.threadId : makeConversationId();
     state.history = record.history;
     state.documents = documents;
     resetDraft();
     clearError();
     updateActiveChatHeading();
-    renderStoredConversation(conversation);
+    renderStoredConversation(record.summary);
     renderConversationList();
-    applyConversationModel(conversation.model);
+    applyConversationModel(record.summary.model);
     if (focus) el("prompt").focus();
   } catch (error) {
-    showError("Could not open this chat.", error.message || "Browser storage could not be read.");
+    showError("Could not open this chat.", error.message || "Server storage could not be read.");
+  } finally {
+    state.storageLoading = false;
+    setBusy(false);
   }
 }
 
 async function persistCurrentConversation() {
-  if (!state.historyAvailable || !state.history.length) return;
-  const database = await openChatDatabase();
+  if (!state.history.length) return;
   const now = new Date().toISOString();
   const conversation = state.activeConversation || {
-    id: state.threadId,
-    threadId: state.threadId,
-    title: conversationTitle(state.history),
-    createdAt: now,
-    updatedAt: now,
-    model: "",
-    revision: 0,
+    id: state.threadId, threadId: state.threadId, title: conversationTitle(state.history),
+    createdAt: now, updatedAt: now, model: "", revision: 0,
   };
-
-  const transaction = database.transaction(["conversations", "conversationData"], "readwrite");
-  const completion = transactionComplete(transaction);
-  // Observe rejections immediately even if an earlier request in the transaction
-  // throws before execution reaches the final await.
-  completion.catch(() => {});
-  const conversationStore = transaction.objectStore("conversations");
-  const storedSummary = await requestResult(conversationStore.get(conversation.id));
-
-  // A revision mismatch means another tab updated or deleted this chat. Failing
-  // visibly preserves both versions instead of silently overwriting newer data.
-  if ((state.activeConversation && storedSummary?.revision !== conversation.revision)
-    || (!state.activeConversation && storedSummary)) {
-    transaction.abort();
-    await completion.catch(() => {});
-    throw new Error("This chat changed in another tab. Reload it before saving another response.");
-  }
-
-  const summary = {
-    ...conversation,
-    threadId: state.threadId,
-    updatedAt: now,
-    model: el("model").value,
-    revision: (storedSummary?.revision || 0) + 1,
+  // Keep timestamps/revision stable for a lost-acknowledgment retry. The storage
+  // client reuses its mutation ID until this exact save is acknowledged.
+  const candidate = state.pendingConversationSummary || {
+    ...conversation, threadId: state.threadId, updatedAt: now, model: el("model").value,
   };
-  // Metadata and the complete Ollama context commit together, so a sidebar item
-  // can never point at a partially written conversation after a failed write.
-  conversationStore.put(summary);
-  transaction.objectStore("conversationData").put({
-    id: summary.id,
-    schemaVersion: CHAT_SCHEMA_VERSION,
-    history: state.history,
-    documents: state.documents,
-  });
-  await completion;
+  state.pendingConversationSummary = candidate;
+  const summary = await window.hypermaniaStorage.saveConversation(candidate, state.history, state.documents);
+  state.pendingConversationSummary = null;
 
   state.activeConversation = summary;
   state.preferredConversationModel = summary.model;
@@ -414,45 +362,39 @@ async function persistCurrentConversation() {
 }
 
 async function persistCurrentConversationSafely() {
-  if (!state.historyAvailable) {
-    markActiveChatUnsaved();
-    showError(
-      "This chat is not being saved.",
-      "Saved chats are unavailable in this browser, so this conversation will last only until the page closes."
-    );
-    return;
-  }
-
   try {
     await persistCurrentConversation();
+    state.historyAvailable = true;
+    el("retrySave").hidden = true;
   } catch (error) {
     // Persistence is deliberately outside the model-request failure path. The
     // completed answer remains usable in this tab even when storage is full.
     markActiveChatUnsaved();
+    el("retrySave").hidden = false;
     debugLog("conversation_save_error", { message: error.message || String(error) });
     showError(
       "This response finished, but the chat could not be saved.",
-      error.message || "It is still visible in this tab. Browser storage may be full or unavailable."
+      error.message || "It is still visible in this tab. Server storage may be full or unavailable."
     );
   }
 }
 
 async function deleteConversation(conversation) {
-  if (state.requestInProgress) return;
+  if (state.requestInProgress || state.storageLoading || state.pendingConversationSummary) return;
   const draftWarning = state.activeConversation?.id === conversation.id && hasDraft()
     ? " Your unsent draft will also be discarded."
     : "";
   if (!window.confirm(`Delete “${conversation.title}”? This cannot be undone.${draftWarning}`)) return;
 
+  state.storageLoading = true;
+  // Prevent new drafts/sends while deletion owns the context and its fallback.
+  setBusy(true, "Deleting chat…");
   try {
-    const database = await openChatDatabase();
-    // Delete the lightweight summary and the potentially large context in the
-    // same transaction so neither can be left orphaned.
-    const transaction = database.transaction(["conversations", "conversationData"], "readwrite");
-    transaction.objectStore("conversations").delete(conversation.id);
-    transaction.objectStore("conversationData").delete(conversation.id);
-    await transactionComplete(transaction);
+    await window.hypermaniaStorage.request(`conversations/${conversation.id}`, "DELETE", {
+      revision: conversation.revision, mutationId: makeConversationId(),
+    });
 
+    state.storageLoading = false;
     state.conversations = state.conversations.filter((candidate) => candidate.id !== conversation.id);
     if (state.activeConversation?.id === conversation.id) {
       // Clear the deleted context before opening a fallback. If that fallback is
@@ -466,30 +408,40 @@ async function deleteConversation(conversation) {
     }
     setStatus("Chat deleted.");
   } catch (error) {
-    showError("Could not delete this chat.", error.message || "Browser storage could not be updated.");
+    showError("Could not delete this chat.", error.message || "Server storage could not be updated.");
+  } finally {
+    state.storageLoading = false;
+    setBusy(false);
   }
 }
 
 async function loadConversationHistory() {
+  state.storageLoading = true;
+  setBusy(true, "Loading saved chats…");
   try {
-    const database = await openChatDatabase();
-    const transaction = database.transaction("conversations", "readonly");
-    const conversations = await requestResult(transaction.objectStore("conversations").getAll());
+    const conversations = await window.hypermaniaStorage.request("conversations");
+    state.historyAvailable = true;
+    state.storageLoading = false;
     state.conversations = conversations
       .filter(isValidConversationSummary)
       .sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
     renderConversationList();
     if (state.conversations.length) {
-      await selectConversation(state.conversations[0].id, { focus: false, confirmDraft: false });
+      await selectConversation(state.conversations[0].id, { focus: false, confirmDraft: false, reload: true });
+    } else {
+      startNewConversation({ focus: false, confirmDraft: false });
     }
   } catch (error) {
     state.historyAvailable = false;
     renderConversationList();
     showError(
-      "Saved chats are unavailable in this browser.",
+      "Server chat storage is unavailable.",
       "You can still chat, but conversations will last only until this page closes."
     );
     debugLog("conversation_load_error", { message: error.message || String(error) });
+  } finally {
+    state.storageLoading = false;
+    setBusy(false);
   }
 }
 
@@ -500,7 +452,8 @@ function getContextLength() {
 }
 
 function buildRequestBody(model, messages, thinkValue, stream, documentContext = {}) {
-  const systemInstruction = window.hypermaniaPreferences.getSystemInstruction();
+  const systemInstruction = state.requestInProgress && typeof state.activeSystemInstruction === "string"
+    ? state.activeSystemInstruction : window.hypermaniaPreferences.getSystemInstruction();
   const body = {
     model,
     messages: documentContext.mode === "none"
@@ -548,13 +501,13 @@ function setBusy(isBusy, statusText = "") {
   }
 
   const notice = el("responseNotice");
-  if (state.activeJobId && statusText) {
-    // After the first answer token the waiting bubble is removed. Keep model
-    // lifecycle status visible beside the draft throughout reconnect and Stop.
+  if (state.activeJobId && statusText && !state.assistantWaitLabel) {
+    // The waiting bubble owns progress until the first answer token removes it.
+    // Only then use the composer notice, including reconnect and pending Stop.
     notice.textContent = statusText;
     notice.hidden = false;
     state.responseNoticeIsProgress = true;
-  } else if (!state.activeJobId && state.responseNoticeIsProgress) {
+  } else if ((state.activeJobId && state.assistantWaitLabel) || (!state.activeJobId && state.responseNoticeIsProgress)) {
     notice.hidden = true;
     notice.textContent = "";
     state.responseNoticeIsProgress = false;
@@ -562,8 +515,11 @@ function setBusy(isBusy, statusText = "") {
 
   const send = el("send");
   updateSendState();
+  send.hidden = Boolean(state.activeJobId);
   send.textContent = isBusy ? "Waiting..." : state.sendLabel;
   el("keepWorking").disabled = isBusy;
+  const expand = el("expandComposer");
+  if (expand) expand.disabled = isBusy;
   el("stopResponse").hidden = !state.activeJobId;
   el("stopResponse").disabled = state.stopRequested;
   el("stopResponse").textContent = state.stopRequested ? "Stopping…" : "Stop";
@@ -607,7 +563,7 @@ function ensureErrorControls() {
   retry.addEventListener("click", () => {
     // The failed provisional history entry was removed before this control was
     // shown, so one click resubmits the preserved draft exactly once.
-    if (state.requestInProgress) return;
+    if (state.requestInProgress || state.storageLoading) return;
     retry.disabled = true;
     sendChat();
   });
@@ -667,9 +623,14 @@ function showError(message, hint = "", { referenceId = "", retry = false } = {})
   box.focus();
 }
 
-function scrollMessagesToBottom() {
+function scrollMessagesToBottom(force = false) {
   const messages = el("messages");
-  messages.scrollTop = messages.scrollHeight;
+  if (force || state.followOutput !== false) {
+    messages.scrollTop = messages.scrollHeight;
+    state.followOutput = true;
+  }
+  const latest = el("jumpToLatest");
+  if (latest) latest.hidden = state.followOutput !== false;
 }
 
 function isSafeLink(url) {
@@ -898,6 +859,7 @@ function renderMarkdown(target, source) {
 function setAssistantAnswerText(target, content) {
   target.classList.add("is-streaming");
   target.textContent = content;
+  scrollMessagesToBottom();
 }
 
 function createMessage(role, content, meta = "") {
@@ -1015,7 +977,7 @@ function renderPreview() {
     remove.setAttribute("aria-label", `Remove ${attachment.name}`);
     remove.disabled = state.requestInProgress;
     remove.addEventListener("click", () => {
-      if (state.requestInProgress) return;
+      if (state.requestInProgress || state.storageLoading) return;
       const removalIndex = Array.from(preview.querySelectorAll(".attachment-remove")).indexOf(remove);
       const collection = kind === "Image" ? state.images : state.pdfs;
       collection.splice(index, 1);
@@ -1054,7 +1016,9 @@ function setDropLabel() {
   const open = !el("attachmentTray").hidden;
   el("attachmentToggle").textContent = summary
     ? `${open ? "Hide" : "Show"} ${summary} attached`
-    : `${open ? "Hide" : "+ Add"} images or PDF`;
+    : open ? "Hide files" : "+ Attach";
+  el("attachmentToggle").setAttribute("aria-label", summary
+    ? `${open ? "Hide" : "Show"} ${summary} attached` : "Add images or PDF");
   updateSendState();
 }
 
@@ -1142,7 +1106,11 @@ function renderThinkOptions(modelName, info) {
     : gptOss && !reportedValues.length ? "medium" : "auto";
   select.value = options.some(([value]) => value === selected) ? selected : fallback;
   state.thinkMode = select.value;
-  window.hypermaniaPreferences.setThinkMode(state.thinkMode);
+  const modelSummary = el("modelSummary");
+  if (modelSummary) {
+    modelSummary.textContent = `${modelName} · Thinking: ${state.thinkMode}`;
+    modelSummary.title = modelSummary.textContent;
+  }
 
   const hint = el("thinkHint");
   if (hint) {
@@ -1436,6 +1404,13 @@ function renderModelMeta() {
 
   const modelName = el("model").value;
   const info = state.modelInfo.get(modelName);
+  const modelSummary = el("modelSummary");
+  if (modelSummary) {
+    modelSummary.textContent = modelName
+      ? `${modelName}${supportsThinking(info) ? ` · Thinking: ${state.thinkMode}` : ""}`
+      : "Choose model";
+    modelSummary.title = modelSummary.textContent;
+  }
   const summary = document.createElement("div");
   // The selector now shows the model name in the conversation header. Keep its
   // description accessible without duplicating those labels; warnings stay visible.
@@ -1500,8 +1475,20 @@ async function fetchModelInfo(model) {
   return res.json();
 }
 
+function renderModelReadiness(message = "", retry = false) {
+  el("modelReadiness").hidden = !message;
+  el("modelReadinessText").textContent = message;
+  el("retryModels").hidden = !retry;
+  el("retryModels").disabled = !retry;
+  updateSendState();
+}
+
 async function loadModels() {
+  if (state.requestInProgress || state.storageLoading) return;
   const select = el("model");
+  state.modelReady = false;
+  state.models = [];
+  renderModelReadiness("Loading models…");
   select.innerHTML = "";
   state.modelInfo.clear();
   state.modelInfoErrors.clear();
@@ -1512,9 +1499,10 @@ async function loadModels() {
     const res = await fetch("/api/ollama/tags");
     if (!res.ok) throw new Error(`HTTP ${res.status}`);
     const data = await res.json();
-    state.models = (data.models || []).map((m) => m.name);
+    state.models = (Array.isArray(data.models) ? data.models : [])
+      .map((m) => m?.name).filter((name) => typeof name === "string" && name.trim());
 
-    const fallback = state.models.find((m) => /vision|llava|gemma3/i.test(m)) || state.models[0] || "llama3.2-vision";
+    const fallback = state.models.find((m) => /vision|llava|gemma3/i.test(m)) || state.models[0] || "";
 
     for (const name of state.models) {
       const option = document.createElement("option");
@@ -1524,15 +1512,17 @@ async function loadModels() {
     }
 
     if (!state.models.length) {
-      const option = document.createElement("option");
-      option.value = fallback;
-      option.textContent = fallback;
-      select.appendChild(option);
+      renderThinkOptions("", undefined);
+      renderModelMeta();
+      renderModelReadiness("No models installed. Add a model in Ollama, then retry.", true);
+      setStatus("Ollama is running, but no models are installed.");
+      return;
     }
 
     const savedModel = state.preferredConversationModel || window.hypermaniaPreferences.getModel();
     select.value = state.models.includes(savedModel) ? savedModel : fallback;
-    window.hypermaniaPreferences.setModel(select.value);
+    state.modelReady = true;
+
 
     if (state.preferredConversationModel && !state.models.includes(state.preferredConversationModel)) {
       showError(
@@ -1543,6 +1533,7 @@ async function loadModels() {
 
     await refreshModelInfo(select.value, true);
     renderThinkOptions(select.value, state.modelInfo.get(select.value));
+    renderModelReadiness();
     setStatus(state.models.length ? "Ollama is ready." : "Ollama is running, but no models are installed.");
     debugLog("load_models_success", {
       count: state.models.length,
@@ -1550,16 +1541,14 @@ async function loadModels() {
     });
     annotateOptionsInBackground();
   } catch (error) {
-    setStatus(`Could not load models: ${error.message}`);
+    state.modelReady = false;
+    state.models = [];
+    select.innerHTML = "";
+    setStatus("Ollama is unavailable. Check the connection and retry.");
     debugLog("load_models_error", {
       message: error.message,
     });
-    const fallback = "llama3.2-vision";
-    const option = document.createElement("option");
-    option.value = fallback;
-    option.textContent = fallback;
-    select.appendChild(option);
-    select.value = fallback;
+    renderModelReadiness("Ollama unavailable. Check Settings or retry.", true);
     renderThinkOptions(select.value, state.modelInfo.get(select.value));
     renderModelMeta();
   }
@@ -1653,7 +1642,7 @@ async function renderPdf(pdf, attachmentIndex, attachmentCount) {
 }
 
 async function ingestFiles(fileList, { append = true, pasted = false } = {}) {
-  if (state.requestInProgress) return;
+  if (state.requestInProgress || state.storageLoading) return;
   const files = Array.from(fileList).filter((file) => file.type.startsWith("image/") || isPdf(file));
   if (!files.length) return;
 
@@ -1677,7 +1666,7 @@ async function ingestFiles(fileList, { append = true, pasted = false } = {}) {
 
     // Image reads can finish after Send locks the composer; discard that late
     // selection rather than changing the attachment snapshot being processed.
-    if (state.requestInProgress) return;
+    if (state.requestInProgress || state.storageLoading) return;
     const nextPdfCount = append ? state.pdfs.length + pdfs.length : pdfs.length;
     if (state.documents.length + nextPdfCount > MAX_CONVERSATION_DOCUMENTS) {
       throw new Error(`A conversation can contain up to ${MAX_CONVERSATION_DOCUMENTS} PDFs. Start a new chat to attach more.`);
@@ -2036,7 +2025,13 @@ async function fetchChatOnce(model, messages, thinkValue, documentContext = {}) 
 }
 
 async function sendChat() {
-  if (state.requestInProgress) return;
+  if (state.pendingConversationSummary) {
+    showError("Save the completed response first.", "Use Retry saving; this does not generate another response.");
+    return;
+  }
+  if (state.settingsPending && !state.requestInProgress) syncSettingsPreferences();
+  if (state.modelReady === false) return;
+  if (state.requestInProgress || state.storageLoading) return;
   clearError();
   el("responseNotice").hidden = true;
   el("responseNotice").textContent = "";
@@ -2083,6 +2078,11 @@ async function sendChat() {
   const requestId = makeConversationId();
   state.activeRequestId = requestId;
   state.requestInProgress = true;
+  // Follow-up generation belongs to this send, even if another tab edits Settings.
+  state.activeSystemInstruction = window.hypermaniaPreferences.getSystemInstruction();
+  state.followOutput = true;
+  state.composerExpanded = false;
+  el("modelOptions").open = false;
   // Every generation stage in this send shares the policy chosen at submission;
   // later preference changes must not alter an already-running request.
   state.activeKeepWorking = el("keepWorking").checked;
@@ -2185,6 +2185,7 @@ async function sendChat() {
 
     if (reply) {
       renderMarkdown(state.assistantPre, reply);
+      scrollMessagesToBottom();
     } else {
       setAssistantAnswerText(state.assistantPre, cleanThinkingText(thinking)
         ? "(The model completed its reasoning but returned no final answer.)"
@@ -2261,13 +2262,128 @@ async function sendChat() {
     state.assistantWait = null;
     state.assistantWaitLabel = null;
     state.activeRequestId = null;
+    state.activeSystemInstruction = null;
     state.activeJobId = null;
     state.stopRequested = false;
     setBusy(false);
+    if (state.settingsPending) syncSettingsPreferences();
     // The Stop control disappears when its job resolves; return keyboard users
     // to the recovered draft instead of leaving focus on a hidden control.
     if (stopped) el("prompt").focus();
   }
+}
+
+function syncSettingsPreferences() {
+  // Separate settings tabs must not require reloading (and abandoning) a chat.
+  // Apply edits between sends; the active send keeps its original controls.
+  if (state.requestInProgress) {
+    state.settingsPending = true;
+    return;
+  }
+  state.settingsPending = false;
+  el("keepWorking").checked = window.hypermaniaPreferences.getKeepWorking();
+  state.thinkMode = window.hypermaniaPreferences.getThinkMode();
+  const context = window.hypermaniaPreferences.getContextSize();
+  if ([...el("contextSize").options].some((option) => option.value === context)) {
+    el("contextSize").value = context;
+    state.contextSize = Number.parseInt(context, 10);
+  }
+  renderThinkOptions(el("model").value, state.modelInfo.get(el("model").value));
+  renderModelMeta();
+}
+
+function initializeConversationUI() {
+  const body = document.body;
+  const history = document.querySelector(".chat-history");
+  const workspace = document.querySelector(".chat-workspace");
+  const historyLink = document.querySelector(".mobile-history-link");
+  const historyDialog = el("historyDialog");
+  historyLink.addEventListener("click", (event) => {
+    event.preventDefault();
+    historyDialog.appendChild(history);
+    el("closeHistory").hidden = false;
+    historyDialog.showModal();
+    el("closeHistory").focus();
+  });
+  el("closeHistory").addEventListener("click", () => historyDialog.close());
+  historyDialog.addEventListener("close", () => {
+    // Reuse the same history controls/listeners rather than maintaining a copy.
+    workspace.insertBefore(history, workspace.firstChild);
+    el("closeHistory").hidden = true;
+    historyLink.focus();
+  });
+  el("newChat").addEventListener("click", () => {
+    if (!state.requestInProgress && historyDialog.open) historyDialog.close();
+  });
+  el("conversationList").addEventListener("click", (event) => {
+    if (!state.requestInProgress && event.target.closest(".conversation-open") && historyDialog.open) historyDialog.close();
+  });
+  el("readingMode").addEventListener("click", () => {
+    const reading = body.classList.toggle("reading-mode");
+    el("readingMode").setAttribute("aria-pressed", String(reading));
+  });
+  el("navToggle").addEventListener("click", () => {
+    const open = body.classList.toggle("navigation-open");
+    el("navToggle").setAttribute("aria-expanded", String(open));
+  });
+  el("expandComposer").addEventListener("click", () => {
+    state.composerExpanded = !state.composerExpanded;
+    resizeComposer();
+    el("prompt").focus();
+  });
+  el("retryModels").addEventListener("click", loadModels);
+  el("jumpToLatest").addEventListener("click", () => scrollMessagesToBottom(true));
+  el("messages").addEventListener("scroll", () => {
+    const messages = el("messages");
+    // Treat a small bottom margin as following; rounding and line wrapping
+    // should not require the user to hit the exact final pixel to resume.
+    state.followOutput = messages.scrollHeight - messages.clientHeight - messages.scrollTop < 64;
+    el("jumpToLatest").hidden = state.followOutput;
+  });
+  document.addEventListener("click", (event) => {
+    for (const id of ["modelOptions", "requestHelp"]) {
+      // The capability dialog is a child workflow. Do not hide its return
+      // target when a click inside that modal bubbles to the document.
+      if (id === "modelOptions" && (el("modelCapabilitiesDialog").open || el("modelCapabilitiesDialog").contains(event.target))) continue;
+      if (!el(id).contains(event.target)) el(id).open = false;
+    }
+    if (!el("headerNavigation").contains(event.target) && !el("navToggle").contains(event.target)) {
+      body.classList.remove("navigation-open");
+      el("navToggle").setAttribute("aria-expanded", "false");
+    }
+  });
+  document.addEventListener("keydown", (event) => {
+    if (event.key !== "Escape") return;
+    if (el("modelCapabilitiesDialog").open || historyDialog.open) return;
+    for (const id of ["modelOptions", "requestHelp"]) {
+      if (el(id).open) {
+        el(id).open = false;
+        el(id).querySelector("summary").focus();
+      }
+    }
+    if (body.classList.contains("navigation-open")) {
+      body.classList.remove("navigation-open");
+      el("navToggle").setAttribute("aria-expanded", "false");
+      el("navToggle").focus();
+    }
+  });
+  window.addEventListener("beforeunload", (event) => {
+    if (!state.requestInProgress && !state.pendingConversationSummary && !hasDraft()) return;
+    event.preventDefault();
+    event.returnValue = "";
+  });
+  window.addEventListener("focus", async () => {
+    if (await window.hypermaniaPreferences.reload()) syncSettingsPreferences();
+  });
+  const fitViewport = () => {
+    // visualViewport also reflects the on-screen keyboard where supported.
+    const height = window.visualViewport?.height || window.innerHeight;
+    body.style.setProperty("--chat-viewport-height", `${height}px`);
+    resizeComposer();
+  };
+  window.addEventListener("resize", fitViewport);
+  window.visualViewport?.addEventListener("resize", fitViewport);
+  fitViewport();
 }
 
 function attachFileHandling() {
@@ -2312,12 +2428,22 @@ function attachFileHandling() {
   dropzone.addEventListener("drop", async (event) => {
     event.preventDefault();
     setDragState(false);
-    if (state.requestInProgress) return;
+    if (state.requestInProgress || state.storageLoading) return;
     await ingestFiles(event.dataTransfer?.files || []);
   });
 }
 
 el("send").addEventListener("click", sendChat);
+el("retrySave").addEventListener("click", async () => {
+  el("retrySave").disabled = true;
+  try { await persistCurrentConversationSafely(); }
+  finally { el("retrySave").disabled = false; }
+});
+el("reloadHistory").addEventListener("click", async () => {
+  if (state.requestInProgress || state.storageLoading || state.pendingConversationSummary || !confirmDraftDiscard("reload saved chats")) return;
+  await loadConversationHistory();
+});
+window.addEventListener("preference-error", (event) => showError("Preferences were not saved.", event.detail));
 el("stopResponse").addEventListener("click", requestResponseStop);
 el("keepWorking").checked = window.hypermaniaPreferences.getKeepWorking();
 el("keepWorking").addEventListener("change", () => {
@@ -2353,6 +2479,7 @@ el("model").addEventListener("change", () => {
 el("thinkMode").addEventListener("change", () => {
   state.thinkMode = el("thinkMode").value;
   window.hypermaniaPreferences.setThinkMode(state.thinkMode);
+  renderModelMeta();
   clearError();
   debugLog("think_mode_changed", { thinkMode: state.thinkMode });
 });
@@ -2384,7 +2511,7 @@ el("prompt").addEventListener("paste", (event) => {
         .filter(Boolean);
 
   if (pastedImages.length) {
-    if (state.requestInProgress) return;
+    if (state.requestInProgress || state.storageLoading) return;
     event.preventDefault();
     ingestFiles(pastedImages, { append: true, pasted: true });
     return;
@@ -2403,6 +2530,7 @@ el("prompt").addEventListener("paste", (event) => {
 });
 
 attachFileHandling();
+initializeConversationUI();
 el("messages").setAttribute("aria-live", "off");
 el("preview").setAttribute("role", "list");
 el("preview").setAttribute("aria-label", "Attachments ready to send");
@@ -2417,12 +2545,15 @@ const savedContextSize = window.hypermaniaPreferences.getContextSize();
 const contextSelect = el("contextSize");
 contextSelect.value = [...contextSelect.options].some((option) => option.value === savedContextSize) ? savedContextSize : "8192";
 state.contextSize = Number.parseInt(contextSelect.value, 10);
-window.hypermaniaPreferences.setContextSize(contextSelect.value);
+
 
 async function initializeApp() {
   await loadConversationHistory();
   await loadModels();
+  if (window.hypermaniaPreferences.error) showError("Preferences could not be loaded.", window.hypermaniaPreferences.error);
   debugLog("app_loaded", { savedChatCount: state.conversations.length });
 }
 
 initializeApp();
+
+})();

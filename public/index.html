@@ -9,16 +9,18 @@
   <link rel="stylesheet" href="/vendor/katex/katex.min.css" />
 </head>
 
-<body>
+<body class="chat-page">
   <main class="shell">
     <header class="hero chat-hero">
       <div class="hero-copy">
         <h1 class="brand-logo" data-text="HYPERMANIA" aria-label="Hypermania">HYPERMANIA</h1>
       </div>
-      <nav class="header-navigation" aria-label="Main navigation">
+      <nav id="headerNavigation" class="header-navigation" aria-label="Main navigation">
         <a class="secondary nav-link prompt-library-link" href="/prompts.html" target="_blank" rel="noopener">Manage prompts <span aria-hidden="true">&#8599;</span><span class="visually-hidden">(opens in a new tab)</span></a>
-        <a class="secondary nav-link" href="/settings.html">Settings</a>
+        <a class="secondary nav-link" href="/settings.html" target="_blank" rel="noopener">Settings<span class="visually-hidden"> (opens in a new tab)</span></a>
       </nav>
+      <button id="readingMode" class="secondary" type="button" aria-pressed="false" aria-label="Reading mode">Read</button>
+      <button id="navToggle" class="secondary" type="button" aria-expanded="false" aria-controls="headerNavigation">Menu</button>
     </header>
 
     <dialog id="modelCapabilitiesDialog" class="model-capabilities-dialog"
@@ -37,15 +39,18 @@
       </div>
     </dialog>
 
+    <dialog id="historyDialog" aria-labelledby="chatHistoryTitle"></dialog>
     <section class="chat-workspace">
       <aside class="panel chat-history" aria-labelledby="chatHistoryTitle">
         <div class="history-head">
           <div>
-            <p class="section-kicker">Saved locally</p>
+            <p class="section-kicker">Shared on server</p>
             <h2 id="chatHistoryTitle">Chats</h2>
           </div>
           <button id="newChat" type="button">New chat</button>
+          <button id="closeHistory" class="secondary" type="button" hidden>Close</button>
         </div>
+        <button id="reloadHistory" type="button" class="secondary">Reload chats</button>
         <p id="emptyHistory" class="history-empty">Your completed chats will appear here.</p>
         <ol id="conversationList" class="conversation-list" aria-label="Saved chats"></ol>
       </aside>
@@ -53,12 +58,12 @@
       <section class="panel chat" aria-labelledby="activeChatTitle">
         <div class="chat-head">
           <div class="active-chat-heading">
-            <p class="section-kicker">Conversation</p>
             <h2 id="activeChatTitle">New chat</h2>
           </div>
           <a class="secondary nav-link mobile-history-link" href="#chatHistoryTitle">Chats</a>
-          <div class="conversation-model-controls">
-            <div class="model-control">
+          <details id="modelOptions" class="conversation-model-controls">
+            <summary aria-label="Model and thinking options"><span id="modelSummary">Loading models…</span></summary>
+            <div class="model-options-panel"><div class="model-control">
               <label class="model-picker" for="model">
                 <span class="section-kicker">Active model</span>
                 <select id="model" aria-describedby="modelMeta"></select>
@@ -73,8 +78,9 @@
                 <span aria-hidden="true">i</span>
               </button>
             </div>
-            <div id="modelMeta" class="model-meta" aria-live="polite" aria-atomic="true"></div>
-          </div>
+            </div>
+          </details>
+          <div id="modelMeta" class="model-meta" aria-live="polite" aria-atomic="true"></div>
         </div>
         <select id="contextSize" hidden aria-hidden="true">
           <option value="4096">4k</option>
@@ -83,12 +89,20 @@
           <option value="32768">32k</option>
         </select>
         <div id="status" class="visually-hidden" aria-live="polite"></div>
+        <div id="modelReadiness" class="model-readiness" role="status">
+          <span id="modelReadinessText">Loading models…</span>
+          <button id="retryModels" class="secondary" type="button" hidden>Retry</button>
+          <a href="/settings.html" target="_blank" rel="noopener">Settings<span class="visually-hidden"> (opens in a new tab)</span></a>
+        </div>
         <div id="errorBox" class="error-box" hidden>
           <strong>Error</strong>
           <p id="errorMessage"></p>
           <div id="errorHint" class="error-hint"></div>
         </div>
-        <div id="messages" class="messages" aria-live="polite"></div>
+        <div class="conversation-viewport">
+          <div id="messages" class="messages" aria-live="polite"></div>
+          <button id="jumpToLatest" class="secondary jump-to-latest" type="button" hidden>Latest ↓</button>
+        </div>
         <div class="composer">
           <div id="attachmentTray" class="attachment-tray" hidden>
             <div id="dropzone" class="dropzone compact" tabindex="0" role="button"
@@ -105,24 +119,31 @@
           <p id="responseNotice" class="response-notice" hidden></p>
           <label class="composer-field">
             <span class="visually-hidden">Message</span>
-            <textarea id="prompt" rows="4"
-              placeholder="Ask a question about an image or PDF, or just chat..."></textarea>
+            <textarea id="prompt" rows="1" aria-describedby="requestHelpText"
+              placeholder="Message…"></textarea>
           </label>
 
           <div class="composer-actions">
             <button id="attachmentToggle" type="button" class="secondary attachment-toggle" aria-expanded="false"
               aria-controls="attachmentTray">+ Add images or PDF</button>
             <label class="keep-working-control" title="Continue until the response finishes or you press Stop. Turn off for a 30-minute limit.">
-              <input id="keepWorking" type="checkbox" checked /> Keep working
+              <input id="keepWorking" type="checkbox" aria-describedby="requestHelpText" checked /> Keep working
             </label>
             <button id="stopResponse" class="secondary" type="button" hidden>Stop</button>
-            <button id="send" type="button">Send to Ollama</button>
+            <button id="retrySave" type="button" class="secondary" hidden>Retry saving</button>
+            <button id="send" type="button">Send</button>
+            <button id="expandComposer" class="secondary" type="button" aria-expanded="false" aria-controls="prompt">Expand</button>
+            <details id="requestHelp" class="request-help">
+              <summary aria-label="Message options and keyboard help">?</summary>
+              <div id="requestHelpText" class="request-help-panel">Keep working: no time limit. Stop anytime. Off: 30-minute limit.<br>Enter to send · Shift+Enter for a new line.</div>
+            </details>
           </div>
         </div>
       </section>
     </section>
   </main>
 
+  <script src="/server-storage.js"></script>
   <script src="/preferences.js"></script>
   <script src="/chat-history.js"></script>
   <script src="/document-context.js"></script>

@@ -6,6 +6,19 @@
 }(typeof globalThis === "object" ? globalThis : this, () => {
   const KEY = "hypermania.prompts.v1";
 
+  function isValidPromptCollection(data) {
+    return Array.isArray(data) && data.length <= 10000
+      && new Set(data.map((item) => item?.id)).size === data.length
+      && data.every((item) => item && Object.keys(item).every((key) => ["id", "versions"].includes(key))
+        && typeof item.id === "string" && item.id.length > 0 && item.id.length <= 128
+        && Array.isArray(item.versions) && item.versions.length > 0 && item.versions.length <= 10000
+        && item.versions.every((version) => version && Object.keys(version).every((key) => ["title", "content", "savedAt"].includes(key))
+          && typeof version.title === "string"
+          && version.title.trim() && version.title.length <= 120
+          && typeof version.content === "string" && version.content.trim() && version.content.length <= 50000
+          && typeof version.savedAt === "string" && Number.isFinite(Date.parse(version.savedAt))));
+  }
+
   function createLibrary(storage, makeId) {
     let snapshot;
     let prompts;
@@ -14,14 +27,7 @@
       const raw = storage.getItem(KEY);
       const data = raw === null ? [] : JSON.parse(raw);
       // Reject damaged records rather than silently dropping a user's saved history.
-      if (!Array.isArray(data) || new Set(data.map((item) => item?.id)).size !== data.length
-        || data.some((item) => !item || typeof item.id !== "string" || !item.id
-          || !Array.isArray(item.versions) || !item.versions.length
-          || item.versions.some((version) => !version || typeof version.title !== "string"
-            || !version.title.trim() || version.title.length > 120
-            || typeof version.content !== "string" || !version.content.trim()
-            || version.content.length > 50000 || typeof version.savedAt !== "string"
-            || !Number.isFinite(Date.parse(version.savedAt))))) {
+      if (!isValidPromptCollection(data)) {
         throw new Error("Saved prompts could not be read.");
       }
       snapshot = raw;
@@ -66,5 +72,5 @@
     return { load, save, remove };
   }
 
-  return { createLibrary };
+  return { createLibrary, isValidPromptCollection };
 }));

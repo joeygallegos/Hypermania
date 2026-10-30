@@ -1,52 +1,60 @@
-const HYPERMANIA_PREFERENCES = {
-  model: "hypermania.model",
-  thinkMode: "hypermania.thinkMode",
-  contextSize: "hypermania.contextSize",
-  systemInstruction: "hypermania.systemInstruction",
-  keepWorking: "hypermania.keepWorking",
-};
-
-const DEFAULT_SYSTEM_INSTRUCTION = "Always respond in English unless the user asks for another language.";
-
-function readPreference(key, fallback) {
-  try {
-    return localStorage.getItem(key) || fallback;
-  } catch {
-    return fallback;
+(() => {
+  const defaults = {
+    model: "", thinkMode: "auto", contextSize: "8192", keepWorking: "true",
+    systemInstruction: "Always respond in English unless the user asks for another language.",
+  };
+  let values = { ...defaults };
+  let revision = null;
+  let queue = Promise.resolve();
+  let activeWrites = 0;
+  let pendingWrite = null;
+  let writeEpoch = 0;
+  const api = window.hypermaniaStorage;
+  const preferences = { error: "" };
+  function report(error) {
+    preferences.error = error.message;
+    window.dispatchEvent(new CustomEvent("preference-error", { detail: error.message }));
+    return false;
   }
-}
-
-function writePreference(key, value) {
-  try {
-    localStorage.setItem(key, String(value));
-  } catch {
-    // Preferences are optional when browser storage is unavailable.
+  preferences.reload = async () => {
+    // Do not replace the base revision underneath an in-flight local edit.
+    if (activeWrites) return false;
+    const epoch = writeEpoch;
+    try {
+      const result = await api.request("preferences");
+      // A focus read may finish after a local write; preserve its newer snapshot
+      // and retry receipt even if that write did not receive an acknowledgment.
+      if (activeWrites || epoch !== writeEpoch || (revision !== null && result.revision < revision)) return false;
+      values = { ...defaults, ...result.value };
+      revision = result.revision;
+      pendingWrite = null;
+      preferences.error = "";
+      return true;
+    } catch (error) { return report(error); }
+  };
+  function write(key, value) {
+    writeEpoch++;
+    activeWrites++;
+    const saved = queue.then(async () => {
+      if (revision === null) throw new Error("Preferences have not loaded. Reload the page before saving settings.");
+      if (!pendingWrite || pendingWrite.key !== key || pendingWrite.value !== String(value)) pendingWrite = {
+        key, value: String(value), payload: { revision, value: { [key]: String(value) }, mutationId: api.makeId() },
+      };
+      const result = await api.request("preferences", "PUT", pendingWrite.payload);
+      pendingWrite = null;
+      values = { ...defaults, ...result.value };
+      revision = result.revision;
+      preferences.error = "";
+      return true;
+    }).catch(report).finally(() => { activeWrites--; });
+    queue = saved;
+    return saved;
   }
-}
-
-function readOptionalPreference(key, fallback) {
-  // Unlike select preferences, an intentionally blank system instruction is a
-  // valid choice and must not be replaced with the default on the next page.
-  try {
-    const value = localStorage.getItem(key);
-    return value === null ? fallback : value;
-  } catch {
-    return fallback;
+  for (const key of Object.keys(defaults)) {
+    const suffix = key[0].toUpperCase() + key.slice(1);
+    preferences[`get${suffix}`] = () => key === "keepWorking" ? values[key] !== "false" : values[key];
+    preferences[`set${suffix}`] = (value) => write(key, key === "keepWorking" ? Boolean(value) : value);
   }
-}
-
-window.hypermaniaPreferences = {
-  getKeepWorking: () => readPreference(HYPERMANIA_PREFERENCES.keepWorking, "true") !== "false",
-  setKeepWorking: (value) => writePreference(HYPERMANIA_PREFERENCES.keepWorking, Boolean(value)),
-  getModel: () => readPreference(HYPERMANIA_PREFERENCES.model, ""),
-  setModel: (value) => writePreference(HYPERMANIA_PREFERENCES.model, value),
-  getThinkMode: () => readPreference(HYPERMANIA_PREFERENCES.thinkMode, "auto"),
-  setThinkMode: (value) => writePreference(HYPERMANIA_PREFERENCES.thinkMode, value),
-  getContextSize: () => readPreference(HYPERMANIA_PREFERENCES.contextSize, "8192"),
-  setContextSize: (value) => writePreference(HYPERMANIA_PREFERENCES.contextSize, value),
-  getSystemInstruction: () => readOptionalPreference(
-    HYPERMANIA_PREFERENCES.systemInstruction,
-    DEFAULT_SYSTEM_INSTRUCTION
-  ),
-  setSystemInstruction: (value) => writePreference(HYPERMANIA_PREFERENCES.systemInstruction, value),
-};
+  preferences.ready = preferences.reload();
+  window.hypermaniaPreferences = preferences;
+})();

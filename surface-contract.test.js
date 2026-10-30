@@ -29,7 +29,9 @@ test("mobile surface keeps the conversation primary and history reachable", () =
   // layout engine in the dependency-free Node test suite.
   assert.match(html, /<section class="panel chat" aria-labelledby="activeChatTitle">/);
   assert.match(html, /class="secondary nav-link mobile-history-link" href="#chatHistoryTitle"/);
-  assert.match(scss, /@media \(max-width: 820px\)[\s\S]*?\.chat\s*\{[\s\S]*?order:\s*-1;[\s\S]*?height:\s*calc\(100svh - 110px\);/);
+  assert.match(scss, /\.chat-page\s*\{[\s\S]*?height: var\(--chat-viewport-height, 100dvh\)/);
+  assert.match(html, /<dialog id="historyDialog" aria-labelledby="chatHistoryTitle"/);
+  assert.match(app, /historyDialog\.appendChild\(history\)/);
   assert.match(scss, /@media \(max-width: 820px\)[\s\S]*?\.chat-history\s*\{[\s\S]*?max-height:\s*none;[\s\S]*?overflow:\s*visible;/);
   assert.match(scss, /@media \(max-width: 820px\)[\s\S]*?\.conversation-list\s*\{[\s\S]*?overflow-y:\s*visible;/);
   assert.match(scss, /@media \(max-width: 560px\)[\s\S]*?\.header-navigation\s*\{[\s\S]*?grid-template-columns:\s*minmax\(0, 1fr\) auto;/);
@@ -38,7 +40,7 @@ test("mobile surface keeps the conversation primary and history reachable", () =
 test("app header holds navigation while conversation header holds model controls", () => {
   const header = html.match(/<header class="hero chat-hero">([\s\S]*?)<\/header>/)?.[1];
   assert.ok(header);
-  assert.match(header, /<nav class="header-navigation" aria-label="Main navigation">[\s\S]*?href="\/prompts.html"[\s\S]*?href="\/settings.html"[\s\S]*?<\/nav>/);
+  assert.match(header, /<nav id="headerNavigation" class="header-navigation" aria-label="Main navigation">[\s\S]*?href="\/prompts.html"[\s\S]*?href="\/settings.html"[\s\S]*?<\/nav>/);
   assert.doesNotMatch(header, /id="model"|id="thinkMode"|id="modelCapabilitiesButton"/);
   const conversationHead = html.match(/<div class="chat-head">([\s\S]*?)<select id="contextSize"/)?.[1];
   assert.ok(conversationHead);
@@ -64,7 +66,7 @@ test("attachment inventory exposes removable named items and aggregate state", (
 
 test("send progress and recovery controls preserve a retryable draft", () => {
   assert.match(app, /function hasDraft\(\)[\s\S]*?prompt[\s\S]*?state\.images\.length[\s\S]*?state\.pdfs\.length/);
-  assert.match(app, /el\("send"\)\.disabled = state\.requestInProgress \|\| !hasDraft\(\)/);
+  assert.match(app, /el\("send"\)\.disabled = state\.requestInProgress \|\| state\.storageLoading \|\| Boolean\(state\.pendingConversationSummary\) \|\| state\.modelReady === false \|\| !hasDraft\(\)/);
   assert.match(app, /pdfPreparationStatus\(pdf, index \+ 1, pendingPdfs\.length\)/);
   assert.match(app, /setBusy\(true, "Waiting for Ollama…"\)/);
   assert.match(app, /"Receiving reasoning…" : "Generating answer…"/);
@@ -141,7 +143,7 @@ test("system instruction is editable, persisted, and included in future requests
   assert.match(settingsHtml, /id="systemInstruction"[\s\S]*?aria-describedby="systemInstructionHint"/);
   assert.match(settingsHtml, /Leave blank to send no system instruction\./);
   assert.match(settings, /preferences\.setSystemInstruction\(instruction\)/);
-  assert.match(app, /const systemInstruction = window\.hypermaniaPreferences\.getSystemInstruction\(\)/);
+  assert.match(app, /state\.activeSystemInstruction = window\.hypermaniaPreferences\.getSystemInstruction\(\)/);
   assert.match(app, /buildDocumentMessages\([\s\S]*?systemInstruction/);
 });
 

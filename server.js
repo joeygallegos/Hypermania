@@ -1034,8 +1034,16 @@ async function handleOllamaConfig(req, res)
   }
 }
 
+const handleStorage = require("./storage-api").createStorageApi({ readBody, log: appendLogSafely });
+
 const server = http.createServer(async (req, res) =>
 {
+  // Storage owns its security policy, including OPTIONS, before proxy CORS.
+  if (req.url.split("?")[0].startsWith("/api/storage/"))
+  {
+    await handleStorage(req, res);
+    return;
+  }
   if (req.method === "OPTIONS")
   {
     res.writeHead(204, {
@@ -1108,6 +1116,8 @@ const server = http.createServer(async (req, res) =>
     sendError(res, 500, "Unexpected server error. Check the server log and try again.", trace.requestId);
   }
 });
+
+server.on("close", handleStorage.close);
 
 server.listen(PORT, () =>
 {

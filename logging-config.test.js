@@ -64,6 +64,7 @@ test("HYPERMANIA_LOG_FILE writes diagnostics only to the configured absolute pat
       ...process.env,
       PORT: String(port),
       HYPERMANIA_LOG_FILE: logFile,
+      HYPERMANIA_DATA_FILE: path.join(testDirectory, "test.sqlite"),
     },
     stdio: ["ignore", "pipe", "pipe"],
   });

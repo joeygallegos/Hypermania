@@ -65,9 +65,8 @@ for command in systemctl tar node; do
   }
 done
 
-NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]')"
-if (( NODE_MAJOR < 18 )); then
-  echo "Node.js 18 or newer is required (found $(node --version))." >&2
+if ! node -e 'const [major,minor,patch] = process.versions.node.split(".").map(Number); process.exit(major > 24 || major === 24 && (minor > 14 || minor === 14 && patch >= 1) ? 0 : 1)'; then
+  echo "Node.js 24.14.1 or newer is required (found $(node --version))." >&2
   exit 1
 fi
 
@@ -92,10 +91,15 @@ if ! id -u "$SERVICE_USER" >/dev/null 2>&1; then
     --shell /usr/sbin/nologin "$SERVICE_USER"
 fi
 
+# Stop before changing ownership or copying code so live writes cannot race an update.
+if systemctl is-active --quiet "$SERVICE_NAME"; then
+  systemctl stop "$SERVICE_NAME"
+fi
 install -d -o root -g root -m 0755 "$INSTALL_DIR"
 tar -C "$SOURCE_DIR" \
   --exclude='./node_modules' \
   --exclude='./.git' \
+  --exclude='./data' \
   --exclude='./*.log' \
   --exclude='./.env' \
   -cf - . | tar -C "$INSTALL_DIR" -xf -
@@ -103,6 +107,11 @@ tar -C "$SOURCE_DIR" \
 # static route. Install production packages before locking down ownership.
 npm ci --omit=dev --prefix "$INSTALL_DIR"
 chown -R root:root "$INSTALL_DIR"
+# Keep private runtime data writable without granting write access to app code.
+# The source archive excludes data, and this directory survives code updates.
+install -d -o "$SERVICE_USER" -g "$SERVICE_USER" -m 0700 "$INSTALL_DIR/data"
+chown -R "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR/data"
+find "$INSTALL_DIR/data" -type f -exec chmod 0600 {} +
 touch "$INSTALL_DIR/${SERVICE_NAME}.log"
 chown "$SERVICE_USER:$SERVICE_USER" "$INSTALL_DIR/${SERVICE_NAME}.log"
 chmod 0640 "$INSTALL_DIR/${SERVICE_NAME}.log"

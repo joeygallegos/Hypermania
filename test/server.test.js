@@ -9,6 +9,12 @@ const { spawn } = require("node:child_process");
 const { once } = require("node:events");
 
 const PROJECT_DIR = path.resolve(__dirname, "..");
+
+async function storageRequest(route, method = "GET", payload, extraHeaders = {}) {
+  return fetch(`${appBase}/api/storage/${route}`, { method,
+    headers: { "Content-Type": "application/json", "X-Hypermania-Storage": "1", ...extraHeaders },
+    body: payload === undefined ? undefined : JSON.stringify(payload) });
+}
 let testDirectory;
 let logFile;
 let appProcess;
@@ -253,6 +259,7 @@ if (tool === "pdfinfo") {
     env: {
       ...process.env,
       HYPERMANIA_LOG_FILE: logFile,
+      HYPERMANIA_DATA_FILE: path.join(testDirectory, "test.sqlite"),
       HYPERMANIA_PDF_TOOL_RUNNER: pdfToolRunner,
       OLLAMA_BASE: mockOllamaBase,
       PORT: String(appPort),
@@ -786,4 +793,36 @@ test("returns 404 for missing static files", async () => {
   const response = await fetch(`${appBase}/missing-file.txt`);
   assert.equal(response.status, 404);
   assert.equal(await response.text(), "Not found");
+});
+
+
+test("storage API shares acknowledged preferences and rejects stale clients", async () => {
+  const first = await (await storageRequest("preferences")).json();
+  const response = await storageRequest("preferences", "PUT", {
+    revision: first.revision, value: { systemInstruction: "", keepWorking: "false" }, mutationId: randomUUID(),
+  });
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("access-control-allow-origin"), null);
+  assert.equal(response.headers.get("cache-control"), "no-store");
+  const second = await (await storageRequest("preferences")).json();
+  assert.equal(second.value.systemInstruction, "");
+  assert.equal(second.value.keepWorking, "false");
+  assert.equal((await storageRequest("preferences", "PUT", {
+    revision: first.revision, value: { model: "stale" }, mutationId: randomUUID(),
+  })).status, 409);
+});
+
+test("storage routes reject cross-origin traffic, simple forms, invalid methods, and malformed input", async () => {
+  for (const method of ["GET", "OPTIONS", "PUT"]) {
+    const response = await storageRequest("preferences", method, method === "PUT" ? {} : undefined, { Origin: "https://other.example" });
+    assert.equal(response.status, 403);
+    assert.equal(response.headers.get("access-control-allow-origin"), null);
+  }
+  assert.equal((await fetch(`${appBase}/api/storage/preferences`)).status, 403);
+  assert.equal((await storageRequest("preferences", "PATCH", {})).status, 405);
+  assert.equal((await storageRequest("preferences", "PUT", {}, { "Content-Type": "text/plain" })).status, 415);
+  assert.equal((await storageRequest("preferences", "PUT", {})).status, 400);
+  assert.equal((await storageRequest("conversations/%2e%2e%2fprivate")).status, 400);
+  assert.equal((await storageRequest("chunks/owner/blob/0", "PUT", { content: "A".repeat(5 * 1024 * 1024) })).status, 413);
+  assert.equal((await fetch(`${appBase}/data/hypermania.sqlite`)).status, 404);
 });

@@ -1,3 +1,5 @@
+(async () => {
+  await window.hypermaniaPreferences.ready;
 const el = (id) => document.getElementById(id);
 const preferences = window.hypermaniaPreferences;
 let activeModel = "";
@@ -35,7 +37,7 @@ function renderThinkOptions() {
   }
 
   select.value = options.some(([value]) => value === saved) ? saved : (gptOss ? "medium" : "auto");
-  preferences.setThinkMode(select.value);
+
   el("thinkHint").textContent = gptOss
     ? "GPT-OSS uses Low, Medium, or High. Auto maps to Medium here."
     : "Auto lets the model decide. Off and On are best for Qwen-style models.";
@@ -60,7 +62,7 @@ async function loadModels() {
     const fallback = models.find((model) => /vision|llava|gemma3/i.test(model)) || models[0] || "";
     const saved = preferences.getModel();
     activeModel = models.includes(saved) ? saved : fallback;
-    preferences.setModel(activeModel);
+
     activeModelInfo = activeModel ? await fetchModelInfo(activeModel).catch(() => null) : null;
     const capability = activeModel ? (supportsVision(activeModelInfo, activeModel) ? "vision" : "text") : "no installed models";
     el("activeModel").textContent = activeModel ? `${activeModel} · ${capability}` : "No model selected";
@@ -116,23 +118,54 @@ async function saveOllamaConfig() {
   }
 }
 
-function saveSystemInstruction() {
+async function saveSystemInstruction() {
   const instruction = el("systemInstruction").value.trim();
-  preferences.setSystemInstruction(instruction);
-  el("systemInstruction").value = instruction;
+  if (!await preferences.setSystemInstruction(instruction)) return;
+  // The acknowledgment must not replace text typed after this save began.
+  if (el("systemInstruction").value.trim() === instruction) el("systemInstruction").value = instruction;
+  renderInstructionSaveState();
   setNotice(instruction
     ? "System instruction saved. It will apply to future messages."
     : "System instruction disabled for future messages.");
 }
 
+function hasUnsavedInstruction() {
+  return el("systemInstruction").value.trim() !== preferences.getSystemInstruction();
+}
+
+function renderInstructionSaveState() {
+  const dirty = hasUnsavedInstruction();
+  el("instructionSaveState").textContent = dirty ? "Unsaved changes" : "Saved";
+  el("saveSystemInstruction").disabled = !dirty;
+}
+
 const contextSelect = el("contextSize");
 const savedContextSize = preferences.getContextSize();
 contextSelect.value = [...contextSelect.options].some((option) => option.value === savedContextSize) ? savedContextSize : "8192";
-preferences.setContextSize(contextSelect.value);
+
 el("systemInstruction").value = preferences.getSystemInstruction();
+el("systemInstruction").addEventListener("input", renderInstructionSaveState);
+window.addEventListener("beforeunload", (event) => {
+  if (!hasUnsavedInstruction()) return;
+  event.preventDefault();
+  event.returnValue = "";
+});
 el("thinkMode").addEventListener("change", () => preferences.setThinkMode(el("thinkMode").value));
 el("contextSize").addEventListener("change", () => preferences.setContextSize(el("contextSize").value));
 el("refreshModels").addEventListener("click", loadModels);
 el("saveOllamaBase").addEventListener("click", saveOllamaConfig);
 el("saveSystemInstruction").addEventListener("click", saveSystemInstruction);
-Promise.all([loadOllamaConfig(), loadModels()]);
+window.addEventListener("preference-error", (event) => setNotice(event.detail, true));
+el("reloadPreferences").addEventListener("click", async () => {
+  if (hasUnsavedInstruction() && !window.confirm("Discard unsaved instruction edits and reload shared preferences?")) return;
+  if (!await preferences.reload()) return;
+  el("systemInstruction").value = preferences.getSystemInstruction();
+  el("contextSize").value = preferences.getContextSize();
+  renderThinkOptions();
+  renderInstructionSaveState();
+  setNotice("Shared preferences reloaded.");
+});
+await Promise.all([loadOllamaConfig(), loadModels()]);
+if (preferences.error) setNotice(preferences.error, true);
+
+})();

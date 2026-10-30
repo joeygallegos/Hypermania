@@ -15,5 +15,8 @@
   },
   "dependencies": {
     "katex": "0.18.4"
+  },
+  "engines": {
+    "node": ">=24.14.1"
   }
 }
