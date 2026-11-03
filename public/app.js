@@ -324,6 +324,7 @@ async function selectConversation(id, { focus = true, confirmDraft = true, reloa
     state.threadId = isTraceId(record.summary.threadId)
       ? record.summary.threadId : makeConversationId();
     state.history = record.history;
+    state.lastChatRequest = null;
     state.documents = documents;
     resetDraft();
     clearError();
@@ -335,7 +336,6 @@ async function selectConversation(id, { focus = true, confirmDraft = true, reloa
   } catch (error) {
     showError("Could not open this chat.", error.message || "Server storage could not be read.");
   } finally {
-    state.lastChatRequest = null;
     state.storageLoading = false;
     setBusy(false);
   }
@@ -383,17 +383,6 @@ async function persistCurrentConversationSafely() {
   }
 }
 
-async function deleteConversation(conversation) {
-  if (state.requestInProgress || state.storageLoading || state.pendingConversationSummary) return;
-  const draftWarning = state.activeConversation?.id === conversation.id && hasDraft()
-    ? " Your unsent draft will also be discarded."
-    : "";
-  if (!window.confirm(`Delete “${conversation.title}”? This cannot be undone.${draftWarning}`)) return;
-
-  state.storageLoading = true;
-  // Prevent new drafts/sends while deletion owns the context and its fallback.
-  setBusy(true, "Deleting chat…");
-  try {
 function downloadChatDebug() {
   if (!state.history.length || state.storageLoading || state.requestInProgress) return;
   const snapshot = {
@@ -421,6 +410,17 @@ function downloadChatDebug() {
   setTimeout(() => URL.revokeObjectURL(url), 1000);
 }
 
+async function deleteConversation(conversation) {
+  if (state.requestInProgress || state.storageLoading || state.pendingConversationSummary) return;
+  const draftWarning = state.activeConversation?.id === conversation.id && hasDraft()
+    ? " Your unsent draft will also be discarded."
+    : "";
+  if (!window.confirm(`Delete “${conversation.title}”? This cannot be undone.${draftWarning}`)) return;
+
+  state.storageLoading = true;
+  // Prevent new drafts/sends while deletion owns the context and its fallback.
+  setBusy(true, "Deleting chat…");
+  try {
     await window.hypermaniaStorage.request(`conversations/${conversation.id}`, "DELETE", {
       revision: conversation.revision, mutationId: makeConversationId(),
     });
@@ -520,6 +520,7 @@ function setStatus(text) {
 }
 
 function setBusy(isBusy, statusText = "") {
+  el("exportChatDebug").disabled = state.history.length === 0 || state.storageLoading || state.requestInProgress;
   const status = el("status");
   status.classList.toggle("loading", isBusy);
   if (statusText && status.textContent !== statusText) {
@@ -533,7 +534,6 @@ function setBusy(isBusy, statusText = "") {
 
   const notice = el("responseNotice");
   if (state.activeJobId && statusText && !state.assistantWaitLabel) {
-  el("exportChatDebug").disabled = state.history.length === 0 || state.storageLoading || state.requestInProgress;
     // The waiting bubble owns progress until the first answer token removes it.
     // Only then use the composer notice, including reconnect and pending Stop.
     notice.textContent = statusText;
@@ -1790,6 +1790,17 @@ async function streamChat(model, messages, thinkValue, documentContext = {}, ren
   // this exact request can recover the retained job without duplicate inference.
   requestBody.jobId = makeConversationId();
   requestBody.keepWorking = state.activeKeepWorking;
+  if (renderOutput) {
+    // Record the main request before any fallback or polish stage replaces its inputs.
+    state.lastChatRequest = {
+      atEpochMs: Date.now(),
+      requestId: state.activeRequestId,
+      backend: state.activeInference?.backend ?? null,
+      // Keep the constructed body so the export reflects the actual send,
+      // including any document excerpts selected for this particular follow-up.
+      body: requestBody,
+    };
+  }
   const serializedBody = JSON.stringify(requestBody);
   state.activeJobId = requestBody.jobId;
   if (renderOutput) setBusy(true, "Waiting for Ollama…");
@@ -2000,17 +2011,6 @@ async function streamChat(model, messages, thinkValue, documentContext = {}, ren
       }
       buffer += update.data;
       consumeBufferedLines(update.status === "complete" || update.status === "failed");
-  if (renderOutput) {
-    // Record the main request before any fallback or polish stage replaces its inputs.
-    state.lastChatRequest = {
-      atEpochMs: Date.now(),
-      requestId: state.activeRequestId,
-      backend: state.activeInference?.backend ?? null,
-      // Keep the constructed body so the export reflects the actual send,
-      // including any document excerpts selected for this particular follow-up.
-      body: requestBody,
-    };
-  }
 
       if (renderOutput && state.assistantPre && !sawFirstChunk) {
         setAssistantAnswerText(state.assistantPre, "");
@@ -2493,6 +2493,7 @@ el("keepWorking").addEventListener("change", () => {
   window.hypermaniaPreferences.setKeepWorking(el("keepWorking").checked);
 });
 el("newChat").addEventListener("click", () => startNewConversation());
+el("exportChatDebug").addEventListener("click", downloadChatDebug);
 el("modelCapabilitiesButton").addEventListener("click", openModelCapabilities);
 el("closeModelCapabilities").addEventListener("click", () => el("modelCapabilitiesDialog").close());
 el("modelCapabilitiesDialog").addEventListener("close", () => el("modelCapabilitiesButton").focus());
@@ -2600,4 +2601,3 @@ async function initializeApp() {
 initializeApp();
 
 })();
-el("exportChatDebug").addEventListener("click", downloadChatDebug);
