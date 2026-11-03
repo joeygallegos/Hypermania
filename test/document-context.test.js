@@ -106,6 +106,8 @@ test("follow-ups attach only bounded, relevant historical pages to the current u
   assert.deepEqual(outbound[0], { role: "user", content: "Review this" });
   assert.deepEqual(outbound[1], { role: "assistant", content: "Ready", thinking: "notes" });
   assert.deepEqual(outbound[2].images, ["report-image-3"]);
+  assert.ok(outbound[2].content.startsWith(BEGIN_REFERENCE));
+  assert.ok(outbound[2].content.endsWith(`${END_REFERENCE}\n\n${history[2].content}`));
   assert.match(outbound[2].content, /Document: Quarterly report\.pdf \| Page: 3/);
   assert.match(outbound[2].content, /The cancellation clause requir/);
   assert.doesNotMatch(outbound[2].content, /thirty days notice/);

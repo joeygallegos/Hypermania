@@ -226,7 +226,12 @@
       const lastUserIndex = history.findLastIndex((message) => message.role === "user");
       if (lastUserIndex >= 0) {
         const block = referenceBlock(selectedPages);
-        if (block) outbound[lastUserIndex].content += `\n\n${block}`;
+        if (block) {
+          // Keep the current question after the untrusted excerpts so a long
+          // attachment does not bury what the user is asking in this turn.
+          const currentMessage = outbound[lastUserIndex];
+          currentMessage.content = [block, currentMessage.content].filter(Boolean).join("\n\n");
+        }
 
         if (includeImages) {
           const firstSendImages = documents

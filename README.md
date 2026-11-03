@@ -8,7 +8,7 @@ A focused, local-first chat interface for [Ollama](https://ollama.com). Hyperman
 - Stream chats live, with a model selector in chat and advanced behavior controls on a dedicated Settings page.
 - Reopen, continue, review, and delete completed conversations from local chat history.
 - Save reusable prompts with dated version history and copy them into chat.
-- Attach images or PDFs, preview the resulting pages, and send them to compatible vision models. PDFs are rendered locally into PNG page images, while native page text is retained for efficient follow-up questions.
+- Attach images or PDFs, preview the resulting pages, and send them to compatible vision models. PDFs are rendered locally into PNG page images, while native page text is retained for efficient follow-up questions. On follow-ups, retrieved excerpts precede the current question in the model request.
 - Refresh installed models without restarting the UI.
 - Run as a small Node.js service or install it with the included Linux systemd helper.
 
