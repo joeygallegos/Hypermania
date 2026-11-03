@@ -121,6 +121,7 @@ sudo nano /etc/hypermania/hypermania.env
 
 If you edit `hypermania.env`, restart the service for changes to apply. Re-running the installer stops the service during the update, preserves the existing environment file and installed `data/` directory, then starts the service. Source-checkout `data/` is excluded from the copy. The service account owns only the data directory and diagnostic log; application code remains root-owned.
 
+- To investigate missing context, reopen the chat and choose **Download chat debug** in **Chats**. Download once after reopening and again after sending the follow-up that shows the problem. The browser downloads `debug.json` with the loaded transcript, saved attachment data, current system instruction, and the exact main request body prepared since opening the chat. The backend can apply its own context limits. Review the file before sharing because it contains full chat, instruction, and attachment contents.
 ## Server storage and browser import
 
 Hypermania uses Node's built-in SQLite at `data/hypermania.sqlite` beside `server.js`, independent of the working directory. No database service or additional npm dependency is required. Chats, prompts, and the five response preferences are shared across this installation; there are no separate private user accounts. In-memory generation jobs, unsent drafts, and pending files retain their existing lifetime. Completed responses become durable only after saving is acknowledged.

@@ -150,10 +150,11 @@ test("real stream polling handles empty polls, reasoning, reconnect, and answer 
   const observations = [];
   let step = 0;
   let offset = 0;
+  let submittedBody;
   const chunks = ["", JSON.stringify({ message: { thinking: "considering" } }) + "\n", null, "",
     JSON.stringify({ message: { content: "answer" } })];
   Object.assign(h.context, {
-    buildRequestBody: () => ({}), traceHeaders: () => ({}),
+    buildRequestBody: (_model, messages) => ({ messages }), traceHeaders: () => ({}),
     makeConversationId: () => "test-stage",
     CHAT_JOB_HIDDEN_POLL_MS: 2000, CHAT_JOB_POLL_MS: 400,
     CHAT_JOB_FETCH_TIMEOUT_MS: 15000, CHAT_JOB_VISIBLE_RETRY_MS: 30000,
@@ -161,8 +162,11 @@ test("real stream polling handles empty polls, reasoning, reconnect, and answer 
     setTimeout: (callback, ms) => { if (ms < 15000) queueMicrotask(callback); return 1; },
     clearTimeout() {},
     document: { hidden: false, addEventListener() {}, removeEventListener() {} },
-    fetch: async (url) => {
-      if (url === "/api/chat/jobs") return { ok: true, json: async () => ({ id: "job" }) };
+    fetch: async (url, options) => {
+      if (url === "/api/chat/jobs") {
+        submittedBody = JSON.parse(options.body);
+        return { ok: true, json: async () => ({ id: "job" }) };
+      }
       observations.push(h.label());
       const data = chunks[step++];
       if (data === null) throw new Error("disconnected");
@@ -173,7 +177,15 @@ test("real stream polling handles empty polls, reasoning, reconnect, and answer 
   });
   vm.runInContext(streamSource, h.context);
   h.context.beginGenerationMonitor();
-  const result = await h.context.streamChat("mock-model", [], true);
+  const messages = [
+    { role: "system", content: "Use the earlier discussion." },
+    { role: "user", content: "Review this image.", images: ["aW1hZ2U="] },
+    { role: "assistant", content: "The image shows a tree." },
+    { role: "user", content: "What kind of tree?" },
+  ];
+  const result = await h.context.streamChat("mock-model", messages, true);
+  assert.deepEqual(submittedBody.messages, messages);
+  assert.deepEqual(JSON.parse(JSON.stringify(h.context.state.lastChatRequest.body)), submittedBody);
   assert.equal(result.thinking, "considering");
   assert.equal(result.content, "answer");
   assert.ok(observations.includes("Waiting for Ollama — no model output yet (10s)"));

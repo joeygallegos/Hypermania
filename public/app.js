@@ -4,6 +4,7 @@ const state = {
   threadId: makeConversationId(),
   activeRequestId: null,
   history: [],
+  lastChatRequest: null,
   documents: [],
   conversations: [],
   activeConversation: null,
@@ -221,6 +222,8 @@ function startNewConversation({ focus = true, confirmDraft = true } = {}) {
   state.history = [];
   state.followOutput = true;
   state.documents = [];
+  el("exportChatDebug").disabled = true;
+  state.lastChatRequest = null;
   state.activeConversation = null;
   state.threadId = makeConversationId();
   state.preferredConversationModel = "";
@@ -332,6 +335,7 @@ async function selectConversation(id, { focus = true, confirmDraft = true, reloa
   } catch (error) {
     showError("Could not open this chat.", error.message || "Server storage could not be read.");
   } finally {
+    state.lastChatRequest = null;
     state.storageLoading = false;
     setBusy(false);
   }
@@ -390,6 +394,33 @@ async function deleteConversation(conversation) {
   // Prevent new drafts/sends while deletion owns the context and its fallback.
   setBusy(true, "Deleting chat…");
   try {
+function downloadChatDebug() {
+  if (!state.history.length || state.storageLoading || state.requestInProgress) return;
+  const snapshot = {
+    version: 2,
+    exportedAt: new Date().toISOString(),
+    conversation: state.activeConversation,
+    threadId: state.threadId,
+    hasUnsavedChanges: Boolean(state.pendingConversationSummary),
+    settings: {
+      model: el("model").value,
+      backend: state.inferenceBackend ?? null,
+      configuredContextSize: getContextLength() ?? null,
+      systemInstruction: window.hypermaniaPreferences.getSystemInstruction(),
+    },
+    messages: state.history,
+    documents: state.documents,
+    lastChatRequest: state.lastChatRequest,
+  };
+  const url = URL.createObjectURL(new Blob([JSON.stringify(snapshot, null, 2)], { type: "application/json" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = "debug.json";
+  link.click();
+  // Give the browser time to start reading the blob before releasing it.
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
     await window.hypermaniaStorage.request(`conversations/${conversation.id}`, "DELETE", {
       revision: conversation.revision, mutationId: makeConversationId(),
     });
@@ -502,6 +533,7 @@ function setBusy(isBusy, statusText = "") {
 
   const notice = el("responseNotice");
   if (state.activeJobId && statusText && !state.assistantWaitLabel) {
+  el("exportChatDebug").disabled = state.history.length === 0 || state.storageLoading || state.requestInProgress;
     // The waiting bubble owns progress until the first answer token removes it.
     // Only then use the composer notice, including reconnect and pending Stop.
     notice.textContent = statusText;
@@ -1968,6 +2000,17 @@ async function streamChat(model, messages, thinkValue, documentContext = {}, ren
       }
       buffer += update.data;
       consumeBufferedLines(update.status === "complete" || update.status === "failed");
+  if (renderOutput) {
+    // Record the main request before any fallback or polish stage replaces its inputs.
+    state.lastChatRequest = {
+      atEpochMs: Date.now(),
+      requestId: state.activeRequestId,
+      backend: state.activeInference?.backend ?? null,
+      // Keep the constructed body so the export reflects the actual send,
+      // including any document excerpts selected for this particular follow-up.
+      body: requestBody,
+    };
+  }
 
       if (renderOutput && state.assistantPre && !sawFirstChunk) {
         setAssistantAnswerText(state.assistantPre, "");
@@ -2557,3 +2600,4 @@ async function initializeApp() {
 initializeApp();
 
 })();
+el("exportChatDebug").addEventListener("click", downloadChatDebug);

@@ -49,13 +49,13 @@ function harness() {
     }
   }
   for (const id of ["preview", "attachmentTray", "attachmentToggle", "dropzone", "dropLabel", "dropHint",
-    "images", "prompt", "model", "thinkMode", "thinkingControl", "status", "send", "newChat", "conversationList",
+    "images", "prompt", "model", "thinkMode", "thinkingControl", "status", "send", "newChat", "exportChatDebug", "conversationList",
     "keepWorking", "stopResponse", "responseNotice", "modelOptions"]) {
     nodes.set(id, new Element());
   }
   nodes.get("attachmentTray").hidden = true;
   nodes.get("attachmentTray").append(nodes.get("dropzone"), nodes.get("preview"));
-  const state = { images: [], pdfs: [], documents: [], requestInProgress: false, sendLabel: "Send" };
+  const state = { history: [], images: [], pdfs: [], documents: [], requestInProgress: false, sendLabel: "Send" };
   const errors = [];
   const context = vm.createContext({
     window: { hypermaniaPreferences: { getSystemInstruction: () => "" } },
